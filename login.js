@@ -1,7 +1,7 @@
 const AUTH_KEY = 'kp_auth_session';
 
 const ROLES = {
-  admin: { label:'Admin', icon:'bi-shield-lock-fill', color:'#2185D5', allowedRoutes:['dashboard','perusahaan','proyek','metode','jsa','jadwal','manpower','pembelian','laporan','download','akun'], defaultRoute:'dashboard', badge:'bg-primary' },
+  admin: { label:'Admin', icon:'bi-shield-lock-fill', color:'#2185D5', allowedRoutes:['dashboard','perusahaan','proyek','metode','jsa','jadwal','manpower','pembelian','laporan','akun'], defaultRoute:'dashboard', badge:'bg-primary' },
   hse: { label:'HSE', icon:'bi-journal-check', color:'#10B981', allowedRoutes:['dashboard','metode','jsa','jadwal','manpower','laporan'], defaultRoute:'jsa', badge:'bg-success' },
   pembeli: { label:'Pembeli', icon:'bi-cart-fill', color:'#F59E0B', allowedRoutes:['dashboard','pembelian','laporan'], defaultRoute:'pembelian', badge:'bg-warning text-dark' }
 };
