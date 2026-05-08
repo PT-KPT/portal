@@ -338,3 +338,5 @@ const ProcurementPage = {
     });
   }
 };
+// Di akhir pembelian.js, tambahkan:
+export { ProcurementPage };

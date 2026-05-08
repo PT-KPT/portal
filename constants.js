@@ -8,7 +8,6 @@ const ROUTES = Object.freeze({
   MANPOWER: 'manpower',
   PEMBELIAN: 'pembelian',
   LAPORAN: 'laporan',
-  DOWNLOAD: 'download',
   AKUN: 'akun',
 });
 

@@ -282,3 +282,5 @@ const WorkMethodPage = {
     });
   }
 };
+// Di akhir metode.js, tambahkan:
+export { WorkMethodPage };

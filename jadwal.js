@@ -1,7 +1,4 @@
-// jadwal.js — Jadwal Kerja (Sheet: jadwal) — v3
-// Setiap baris jadwal adalah record mandiri di sheet "jadwal",
-// terikat ke project_id dan work_method_id.
-// Data TIDAK lagi ditempel ke work_steps di work_methods.
+// jadwal.js — Jadwal Kerja (Sheet: jadwal) — v3.1 dengan fix timeout
 
 const SchedulePage = {
   _currentProjectId: null,
@@ -401,7 +398,7 @@ const SchedulePage = {
     }).length;
   },
 
-  /* ──────────────────── SAVE ──────────────────── */
+  /* ──────────────────── SAVE (FIXED) ──────────────────── */
   async saveAllSchedules() {
     if (!this._currentProjectId) {
       UIService.showToast('Pilih proyek terlebih dahulu!', TOAST.WARNING);
@@ -431,12 +428,19 @@ const SchedulePage = {
     }
 
     const saveBtn = document.getElementById('btnSaveSchedule');
-    if (saveBtn) { saveBtn.disabled = true; saveBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> Menyimpan…'; }
+    if (saveBtn) { 
+      saveBtn.disabled = true; 
+      saveBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> Menyimpan…';
+    }
 
     try {
-      const operations = rowsToSave.map(s => {
+      // FIX: Persiapkan operations
+      const now = new Date().toISOString();
+      const operations = rowsToSave.map((s, idx) => {
         // Buat ID baru untuk baris yang belum pernah disimpan
-        if (!s.id) s.id = 'sch_' + Date.now() + '_' + rowsToSave.indexOf(s) + '_' + Math.random().toString(36).substr(2,5);
+        if (!s.id) {
+          s.id = 'sch_' + Date.now() + '_' + idx + '_' + Math.random().toString(36).substr(2, 5);
+        }
 
         return {
           sheet: SHEETS.SCHEDULE,
@@ -450,11 +454,20 @@ const SchedulePage = {
             work_process:   s.work_process,
             start_date:     s.start_date || '',
             end_date:       s.end_date   || '',
-            updated_at:     new Date().toISOString()
+            updated_at:     now
           }
         };
       });
 
+      // FIX: Tampilkan progress untuk batch besar
+      const totalOps = operations.length;
+      console.log(`[SchedulePage] Menyimpan ${totalOps} jadwal...`);
+      
+      if (totalOps > 20) {
+        UIService.showToast(`Menyimpan ${totalOps} jadwal... Mohon tunggu.`, TOAST.INFO);
+      }
+
+      // Gunakan DB.batchUpsert yang sudah difix dengan chunking
       await DB.batchUpsert(operations);
 
       // INVALIDASI CERDAS: Hanya untuk proyek yang sedang aktif
@@ -465,11 +478,59 @@ const SchedulePage = {
       this._updateDirtyBanner();
       this._renderSchedule();
 
-      UIService.showToast(`${rowsToSave.length} jadwal berhasil disimpan!`, TOAST.SUCCESS);
+      UIService.showToast(`${totalOps} jadwal berhasil disimpan!`, TOAST.SUCCESS);
     } catch (err) {
+      console.error('[SchedulePage] Gagal menyimpan jadwal:', err);
       AppError.handle(err, 'Menyimpan jadwal');
+      
+      // FIX: Fallback — simpan satu per satu jika batch gagal
+      if (err.message.includes('timeout') || err.message.includes('Timeout')) {
+        UIService.showToast('Batch gagal, mencoba simpan satu per satu...', TOAST.WARNING);
+        try {
+          let savedCount = 0;
+          for (const row of rowsToSave) {
+            try {
+              await DB.upsert(SHEETS.SCHEDULE, {
+                id:             row.id || ('sch_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5)),
+                project_id:     row.project_id || this._currentProjectId,
+                work_method_id: row.work_method_id,
+                document_number: row.document_number,
+                step_number:    row.step_number,
+                work_stage:     row.work_stage,
+                work_process:   row.work_process,
+                start_date:     row.start_date || '',
+                end_date:       row.end_date   || '',
+                updated_at:     new Date().toISOString()
+              });
+              savedCount++;
+            } catch (singleErr) {
+              console.error(`[SchedulePage] Gagal simpan baris ${row.step_number}:`, singleErr);
+            }
+          }
+          
+          AppCache.invalidateRelated(SHEETS.SCHEDULE, { projectId: this._currentProjectId });
+          this._scheduleRows.forEach(s => s.isDirty = false);
+          this._updateDirtyBanner();
+          this._renderSchedule();
+          
+          if (savedCount > 0) {
+            UIService.showToast(`${savedCount}/${totalOps} jadwal berhasil disimpan!`, TOAST.SUCCESS);
+          } else {
+            UIService.showToast('Gagal menyimpan jadwal.', TOAST.DANGER);
+          }
+        } catch (fallbackErr) {
+          console.error('[SchedulePage] Fallback juga gagal:', fallbackErr);
+          AppError.handle(fallbackErr, 'Menyimpan jadwal (fallback)');
+        }
+      }
     } finally {
-      if (saveBtn) { saveBtn.disabled = false; saveBtn.innerHTML = '<i class="bi bi-save"></i> Simpan Jadwal'; }
+      if (saveBtn) { 
+        saveBtn.disabled = false; 
+        saveBtn.innerHTML = '<i class="bi bi-save"></i> Simpan Jadwal'; 
+      }
     }
   }
 };
+
+// Di akhir jadwal.js, tambahkan:
+export { SchedulePage };

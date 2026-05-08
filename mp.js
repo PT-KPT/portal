@@ -434,3 +434,5 @@ const ManpowerPage = {
     );
   }
 };
+// Di akhir mp.js, tambahkan:
+export { ManpowerPage };

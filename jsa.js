@@ -327,3 +327,5 @@ const JSAPage = {
     });
   }
 };
+// Di akhir jsa.js, tambahkan:
+export { JSAPage };

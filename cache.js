@@ -1,7 +1,13 @@
-const _cache = {};
-const _cacheTimestamps = {};
-const _cacheMeta = {};
-const _pending = {};
+// cache.js — v2.0 with Memory Management & Performance Optimization
+
+const _cache = new Map(); // Gunakan Map untuk performa lebih baik
+const _cacheTimestamps = new Map();
+const _cacheMeta = new Map();
+const _pending = new Map();
+
+// Maximum cache size untuk mencegah memory leak
+const MAX_CACHE_SIZE = 100;
+const MAX_CACHE_AGE = 30 * 60 * 1000; // 30 menit
 
 const PRIORITY_SHEETS = Object.freeze({
   company: { ttl: 60 * 60 * 1000, preload: true, staleWhileRevalidate: true },
@@ -56,8 +62,6 @@ const BG_REFRESH_THRESHOLD = Object.freeze({
   default: 0.70,
 });
 
-// DEPENDENCY MAP: Mendefinisikan hubungan antar sheet
-// Format: { sheet: [sheets_yang_bergantung_padanya] }
 const DEPENDENCY_MAP = Object.freeze({
   'projects': ['jsa', 'work_methods', 'manpower', 'procurement', 'jadwal'],
   'work_methods': ['jsa', 'jadwal'],
@@ -65,8 +69,6 @@ const DEPENDENCY_MAP = Object.freeze({
   'company': ['laporan'],
 });
 
-// REVERSE DEPENDENCY MAP: Untuk invalidasi naik (bottom-up)
-// Format: { sheet: [sheets_yang_mempengaruhinya] }
 const REVERSE_DEPENDENCY_MAP = (() => {
   const reverse = {};
   Object.entries(DEPENDENCY_MAP).forEach(([source, targets]) => {
@@ -78,7 +80,67 @@ const REVERSE_DEPENDENCY_MAP = (() => {
   return Object.freeze(reverse);
 })();
 
+// MEMORY LEAK FIX: Periodic cleanup timer
+let _cleanupTimer = null;
+
 const AppCache = {
+  // MEMORY MANAGEMENT: Periodic cleanup untuk mencegah memory leak
+  _startPeriodicCleanup() {
+    if (_cleanupTimer) return;
+    _cleanupTimer = setInterval(() => {
+      this._evictExpiredEntries();
+    }, 5 * 60 * 1000); // Setiap 5 menit
+    
+    // Cleanup timer saat page unload
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', () => {
+        if (_cleanupTimer) {
+          clearInterval(_cleanupTimer);
+          _cleanupTimer = null;
+        }
+      });
+    }
+  },
+
+  // MEMORY MANAGEMENT: Hapus cache yang expired
+  _evictExpiredEntries() {
+    const now = Date.now();
+    const keysToDelete = [];
+    
+    _cacheTimestamps.forEach((timestamp, key) => {
+      if (now - timestamp > MAX_CACHE_AGE) {
+        keysToDelete.push(key);
+      }
+    });
+    
+    keysToDelete.forEach(key => {
+      _cache.delete(key);
+      _cacheTimestamps.delete(key);
+      _cacheMeta.delete(key);
+      _pending.delete(key);
+    });
+    
+    if (keysToDelete.length > 0) {
+      console.debug(`[AppCache] Evicted ${keysToDelete.length} expired entries`);
+    }
+  },
+
+  // MEMORY MANAGEMENT: Enforce max cache size (LRU-like)
+  _enforceMaxSize() {
+    if (_cache.size > MAX_CACHE_SIZE) {
+      // Hapus entry tertua
+      const entries = [..._cacheTimestamps.entries()]
+        .sort((a, b) => a[1] - b[1]);
+      
+      const toDelete = entries.slice(0, _cache.size - MAX_CACHE_SIZE);
+      toDelete.forEach(([key]) => {
+        _cache.delete(key);
+        _cacheTimestamps.delete(key);
+        _cacheMeta.delete(key);
+      });
+    }
+  },
+
   getPrioritySheets() {
     return Object.keys(PRIORITY_SHEETS).filter(s => PRIORITY_SHEETS[s].preload);
   },
@@ -97,7 +159,6 @@ const AppCache = {
 
   buildKey(sheet, params) {
     if (params && Object.keys(params).length > 0) {
-      // Urutkan params untuk konsistensi key
       const sorted = {};
       Object.keys(params).sort().forEach(k => {
         sorted[k] = params[k];
@@ -107,14 +168,8 @@ const AppCache = {
     return sheet;
   },
 
-  /**
-   * Ekstrak dependencies dari params cache key
-   * @param {string} sheet - Nama sheet
-   * @param {object} params - Parameter yang digunakan untuk fetch
-   * @returns {string[]} Array dependency strings
-   */
   extractDependencies(sheet, params = {}) {
-    const deps = [sheet]; // Selalu depend pada sheet utamanya
+    const deps = [sheet];
     
     if (params.filterField === 'project_id' && params.filterValue) {
       deps.push(`projects:${params.filterValue}`);
@@ -128,11 +183,10 @@ const AppCache = {
       deps.push(`personnel:${params.filterValue}`);
     }
     
-    // Tambahkan reverse dependencies
     const reverseDeps = REVERSE_DEPENDENCY_MAP[sheet] || [];
     reverseDeps.forEach(revDep => deps.push(revDep));
     
-    return [...new Set(deps)]; // Hapus duplikat
+    return [...new Set(deps)];
   },
 
   getTTL(sheet) {
@@ -148,8 +202,8 @@ const AppCache = {
   },
 
   isStale(key, sheet) {
-    if (!_cache[key]) return false;
-    const ts = _cacheTimestamps[key];
+    if (!_cache.has(key)) return false;
+    const ts = _cacheTimestamps.get(key);
     if (!ts) return false;
     return (Date.now() - ts) >= this.getTTL(sheet || 'default');
   },
@@ -157,15 +211,15 @@ const AppCache = {
   isStaleWindowValid(key, sheet) {
     const sw = this.getStaleWindow(sheet);
     if (!sw) return false;
-    if (!_cache[key]) return false;
-    const ts = _cacheTimestamps[key];
+    if (!_cache.has(key)) return false;
+    const ts = _cacheTimestamps.get(key);
     if (!ts) return false;
     return (Date.now() - ts) < (this.getTTL(sheet) + sw);
   },
 
   isValid(key, sheet, allowStale = false) {
-    if (!_cache[key]) return false;
-    const ts = _cacheTimestamps[key];
+    if (!_cache.has(key)) return false;
+    const ts = _cacheTimestamps.get(key);
     if (!ts) return false;
     const age = Date.now() - ts;
     const ttl = this.getTTL(sheet || 'default');
@@ -177,16 +231,14 @@ const AppCache = {
   },
 
   get(key) {
-    return _cache[key];
+    return _cache.get(key);
   },
 
   set(key, value, sheet, meta = {}) {
     const now = Date.now();
     
-    // Ekstrak dependencies dari params di key
     let dependsOn = meta.dependsOn || [];
     
-    // Jika key mengandung params (format: sheet::{"filterField":"project_id","filterValue":"proj_123"})
     if (key.includes('::')) {
       try {
         const parts = key.split('::');
@@ -195,57 +247,56 @@ const AppCache = {
           dependsOn = [...dependsOn, ...this.extractDependencies(sheet, params)];
         }
       } catch (e) {
-        // Key bukan JSON params, gunakan sebagai string biasa
         dependsOn = [sheet];
       }
     } else {
-      // Key sederhana (hanya nama sheet)
       dependsOn = [sheet];
     }
     
-    // Tambahkan reverse dependencies
     const reverseDeps = REVERSE_DEPENDENCY_MAP[sheet] || [];
     dependsOn = [...new Set([...dependsOn, ...reverseDeps])];
     
-    _cache[key] = value;
-    _cacheTimestamps[key] = now;
-    _cacheMeta[key] = {
-      ..._cacheMeta[key],
+    _cache.set(key, value);
+    _cacheTimestamps.set(key, now);
+    _cacheMeta.set(key, {
+      ..._cacheMeta.get(key),
       ...meta,
       sheet,
       dependsOn,
       isPriority: this.isPrioritySheet(sheet),
       hasStale: this.hasStaleSupport(sheet),
       lastUpdated: now
-    };
+    });
+    
+    // MEMORY MANAGEMENT: Enforce max size
+    this._enforceMaxSize();
   },
 
-  /**
-   * Invalidasi cache berdasarkan dependency tag
-   * @param {string} dependency - Tag dependency (e.g., 'jsa', 'projects:proj_123', 'work_methods:wm_456')
-   */
   invalidateByDependency(dependency) {
     let count = 0;
-    Object.keys(_cache).forEach(key => {
-      const meta = _cacheMeta[key];
+    const keysToDelete = [];
+    
+    _cacheMeta.forEach((meta, key) => {
       if (meta && meta.dependsOn && meta.dependsOn.includes(dependency)) {
-        delete _cache[key];
-        delete _cacheTimestamps[key];
-        delete _cacheMeta[key];
-        count++;
+        keysToDelete.push(key);
       }
     });
     
-    // Juga invalidasi cache yang bergantung pada sheet ini (cascading upward)
+    keysToDelete.forEach(key => {
+      _cache.delete(key);
+      _cacheTimestamps.delete(key);
+      _cacheMeta.delete(key);
+      count++;
+    });
+    
     if (!dependency.includes(':')) {
       const dependents = DEPENDENCY_MAP[dependency] || [];
       dependents.forEach(dep => {
-        Object.keys(_cache).forEach(key => {
-          const meta = _cacheMeta[key];
-          if (meta && meta.dependsOn && meta.dependsOn.includes(dep)) {
-            delete _cache[key];
-            delete _cacheTimestamps[key];
-            delete _cacheMeta[key];
+        _cacheMeta.forEach((meta, key) => {
+          if (meta && meta.dependsOn && meta.dependsOn.includes(dep) && !keysToDelete.includes(key)) {
+            _cache.delete(key);
+            _cacheTimestamps.delete(key);
+            _cacheMeta.delete(key);
             count++;
           }
         });
@@ -255,59 +306,44 @@ const AppCache = {
     return count;
   },
 
-  /**
-   * Invalidasi cache untuk sheet tertentu (presisi dengan dependencies)
-   * @param {string} sheet - Nama sheet
-   * @param {object} options - Opsi tambahan
-   * @param {string} options.projectId - ID proyek spesifik (opsional)
-   * @param {string} options.entityId - ID entitas spesifik (opsional)
-   */
   invalidate(sheet, options = {}) {
     let count = 0;
     
     if (options.projectId) {
-      // Invalidasi presisi: hanya cache yang terkait proyek tertentu
       count += this.invalidateByDependency(`projects:${options.projectId}`);
     } else if (options.entityId) {
-      // Invalidasi presisi: hanya cache yang terkait entitas tertentu
       count += this.invalidateByDependency(`${sheet}:${options.entityId}`);
     } else {
-      // Invalidasi global untuk sheet
       count += this.invalidateByDependency(sheet);
       
-      // Juga invalidasi cache simple keys
-      Object.keys(_cache).forEach(key => {
+      const keysToDelete = [];
+      _cache.forEach((_, key) => {
         if (key === sheet || key.startsWith(sheet + '::')) {
-          delete _cache[key];
-          delete _cacheTimestamps[key];
-          delete _cacheMeta[key];
-          count++;
+          keysToDelete.push(key);
         }
       });
+      
+      keysToDelete.forEach(key => {
+        _cache.delete(key);
+        _cacheTimestamps.delete(key);
+        _cacheMeta.delete(key);
+      });
+      
+      count += keysToDelete.length;
     }
     
     return count;
   },
 
-  /**
-   * Invalidasi cache terkait (cascading) saat ada perubahan data
-   * @param {string} sheet - Sheet yang diubah
-   * @param {object} options - Opsi tambahan
-   * @param {string} options.projectId - ID proyek spesifik (opsional)
-   * @param {string} options.entityId - ID entitas spesifik (opsional)
-   */
   invalidateRelated(sheet, options = {}) {
-    // Invalidasi sheet yang diubah
     this.invalidate(sheet, options);
     
-    // Invalidasi dashboard_stats dan laporan jika relevan
     const sheetToInvalidate = ['jsa', 'work_methods', 'manpower', 'procurement', 'jadwal', 'projects', 'company'];
     if (sheetToInvalidate.includes(sheet)) {
       this.invalidateByDependency('dashboard_stats');
       this.invalidateByDependency('laporan');
     }
     
-    // Cascading invalidate berdasarkan dependency map
     const dependents = DEPENDENCY_MAP[sheet] || [];
     dependents.forEach(dep => {
       if (options.projectId) {
@@ -319,25 +355,21 @@ const AppCache = {
   },
 
   clear() {
-    Object.keys(_cache).forEach(k => {
-      delete _cache[k];
-      delete _cacheTimestamps[k];
-      delete _cacheMeta[k];
-    });
+    _cache.clear();
+    _cacheTimestamps.clear();
+    _cacheMeta.clear();
+    _pending.clear();
   },
 
-  getPending(key) { return _pending[key] || null; },
-  setPending(key, promise) { _pending[key] = promise; },
-  deletePending(key) { delete _pending[key]; },
+  getPending(key) { return _pending.get(key) || null; },
+  setPending(key, promise) { _pending.set(key, promise); },
+  deletePending(key) { _pending.delete(key); },
 
-  /**
-   * Dapatkan statistik cache untuk debugging
-   */
   getStats() {
-    const totalKeys = Object.keys(_cache).length;
+    const totalKeys = _cache.size;
     const bySheet = {};
     
-    Object.entries(_cacheMeta).forEach(([key, meta]) => {
+    _cacheMeta.forEach((meta, key) => {
       const sheet = meta.sheet || 'unknown';
       if (!bySheet[sheet]) bySheet[sheet] = { count: 0, dependencies: new Set() };
       bySheet[sheet].count++;
@@ -346,6 +378,8 @@ const AppCache = {
     
     return {
       totalKeys,
+      cacheSize: _cache.size,
+      pendingSize: _pending.size,
       bySheet: Object.fromEntries(
         Object.entries(bySheet).map(([sheet, data]) => [
           sheet,
@@ -399,10 +433,13 @@ const AppCache = {
   },
 
   getCacheAge(key) {
-    const ts = _cacheTimestamps[key];
+    const ts = _cacheTimestamps.get(key);
     if (!ts) return null;
     return Math.round((Date.now() - ts) / 1000);
   },
 };
+
+// MEMORY LEAK FIX: Mulai periodic cleanup
+AppCache._startPeriodicCleanup();
 
 window.AppCache = AppCache;

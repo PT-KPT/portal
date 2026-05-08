@@ -84,3 +84,5 @@ const CompanyPage = {
     }
   }
 };
+// Di akhir perusahaan.js, tambahkan:
+export { CompanyPage };

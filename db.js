@@ -1,49 +1,106 @@
+// db.js — v2.1 with Batch Chunking & Timeout Fix
+
 const GS_URL = window.GS_API_URL || '';
 const GS_TOKEN = window.GS_API_TOKEN || '';
 
-async function _fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
+// PERFORMANCE: Connection pooling & retry optimization
+const _fetchController = new AbortController();
+let _activeRequests = 0;
+const MAX_CONCURRENT_REQUESTS = 3;
+
+// FIX: Tingkatkan timeout untuk batch operations
+const DEFAULT_TIMEOUT = 15000; // 15 detik untuk single operations
+const BATCH_TIMEOUT = 60000;   // 60 detik untuk batch operations
+const MAX_BATCH_SIZE = 50;     // Maksimum items per batch request
+
+async function _fetchWithRetry(url, options = {}, retries = 3, delay = 1000, timeoutMs = DEFAULT_TIMEOUT) {
   let lastError;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const response = await fetch(url, options);
-      if (response.ok || (response.status >= 400 && response.status < 500)) return response;
-      lastError = new Error(`Server error: ${response.status}`);
-    } catch (error) {
-      lastError = error;
+  
+  // PERFORMANCE: Batasi concurrent requests
+  while (_activeRequests >= MAX_CONCURRENT_REQUESTS) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  
+  _activeRequests++;
+  
+  try {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        
+        const response = await fetch(url, {
+          ...options,
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (response.ok || (response.status >= 400 && response.status < 500)) {
+          return response;
+        }
+        lastError = new Error(`Server error: ${response.status}`);
+      } catch (error) {
+        lastError = error;
+        // FIX: Lebih informatif untuk timeout
+        if (error.name === 'AbortError') {
+          lastError = new Error(`Request timeout setelah ${timeoutMs/1000} detik`);
+        }
+      }
+      
+      if (attempt === retries) throw lastError;
+      
+      // PERFORMANCE: Exponential backoff dengan jitter
+      const jitter = Math.random() * 500;
+      const waitTime = delay * Math.pow(2, attempt - 1) + jitter;
+      console.warn(`[DB] Retry ${attempt}/${retries} setelah ${Math.round(waitTime/1000)}s:`, lastError.message);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
-    if (attempt === retries) throw lastError;
-    const waitTime = delay * Math.pow(2, attempt - 1);
-    await new Promise(resolve => setTimeout(resolve, waitTime));
+  } finally {
+    _activeRequests--;
   }
 }
 
 async function _get(params) {
   if (!GS_URL) throw new Error('GS_API_URL belum dikonfigurasi.');
   if (params.action !== 'ping' && GS_TOKEN) params.token = GS_TOKEN;
-  const url = GS_URL + '?' + new URLSearchParams(params).toString();
+  
+  // PERFORMANCE: Gunakan URLSearchParams yang lebih efisien
+  const searchParams = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    searchParams.append(key, value);
+  });
+  
+  const url = GS_URL + '?' + searchParams.toString();
   const res = await _fetchWithRetry(url);
   const json = await res.json();
   if (!json.ok) throw new Error(json.error || 'API error');
   return json;
 }
 
-async function _post(body) {
+async function _post(body, timeoutMs = DEFAULT_TIMEOUT) {
   if (!GS_URL) throw new Error('GS_API_URL belum dikonfigurasi.');
   if (body.action !== 'login' && GS_TOKEN) body.token = GS_TOKEN;
+  
   const res = await _fetchWithRetry(GS_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
     body: JSON.stringify(body)
-  });
+  }, 3, 1000, timeoutMs);
+  
   const json = await res.json();
   if (!json.ok) throw new Error(json.error || 'API error');
   return json;
 }
 
 let _loadingCount = 0;
+let _loadingTimer = null;
 
+// PERFORMANCE: Debounce loading indicator
 function _showLoading() {
   _loadingCount++;
+  if (_loadingTimer) clearTimeout(_loadingTimer);
+  
   const spinner = document.getElementById('navbarLoadingSpinner');
   if (spinner) {
     spinner.style.display = 'block';
@@ -55,18 +112,32 @@ function _showLoading() {
 function _hideLoading() {
   _loadingCount = Math.max(0, _loadingCount - 1);
   if (_loadingCount === 0) {
-    const spinner = document.getElementById('navbarLoadingSpinner');
-    if (spinner) {
-      spinner.style.display = 'none';
-      const video = spinner.querySelector('video');
-      if (video) video.pause();
-    }
+    // PERFORMANCE: Delay hide untuk mengurangi flicker
+    _loadingTimer = setTimeout(() => {
+      const spinner = document.getElementById('navbarLoadingSpinner');
+      if (spinner) {
+        spinner.style.display = 'none';
+        const video = spinner.querySelector('video');
+        if (video) video.pause();
+      }
+    }, 200);
   }
 }
 
-const _debouncedHandlers = {};
-
 const DB = {
+  // PERFORMANCE: Batch fetching untuk mengurangi API calls
+  async _batchFetch(sheets, optsMap = {}) {
+    const results = {};
+    const promises = sheets.map(sheet => {
+      const opts = optsMap[sheet] || {};
+      return this.getAll(sheet, opts).then(result => {
+        results[sheet] = result;
+      });
+    });
+    await Promise.all(promises);
+    return results;
+  },
+
   async getAll(sheet, opts = {}) {
     const key = AppCache.buildKey(sheet, opts);
     const isPriority = AppCache.isPrioritySheet(sheet);
@@ -74,14 +145,23 @@ const DB = {
     if (AppCache.isValid(key, sheet, false)) {
       const cached = AppCache.get(key);
       if (isPriority && AppCache.shouldBackgroundRefresh(key, sheet)) {
-        setTimeout(() => AppCache.refreshStale(sheet), 0);
+        // PERFORMANCE: Gunakan idle callback untuk background refresh
+        if (typeof requestIdleCallback !== 'undefined') {
+          requestIdleCallback(() => AppCache.refreshStale(sheet));
+        } else {
+          setTimeout(() => AppCache.refreshStale(sheet), 1000);
+        }
       }
       return cached;
     }
 
     if (isPriority && AppCache.isStaleWindowValid(key, sheet)) {
       const cached = AppCache.get(key);
-      setTimeout(() => AppCache.refreshStale(sheet), 0);
+      if (typeof requestIdleCallback !== 'undefined') {
+        requestIdleCallback(() => AppCache.refreshStale(sheet));
+      } else {
+        setTimeout(() => AppCache.refreshStale(sheet), 1000);
+      }
       return cached;
     }
 
@@ -121,7 +201,11 @@ const DB = {
 
     if (AppCache.isValid(key, sheet, false)) return AppCache.get(key);
     if (isPriority && AppCache.isStaleWindowValid(key, sheet)) {
-      setTimeout(() => AppCache.refreshStale(sheet), 0);
+      if (typeof requestIdleCallback !== 'undefined') {
+        requestIdleCallback(() => AppCache.refreshStale(sheet));
+      } else {
+        setTimeout(() => AppCache.refreshStale(sheet), 1000);
+      }
       return AppCache.get(key);
     }
     _showLoading();
@@ -137,7 +221,11 @@ const DB = {
     const isPriority = AppCache.isPrioritySheet(sheet);
     if (AppCache.isValid(key, sheet, false)) return AppCache.get(key);
     if (isPriority && AppCache.isStaleWindowValid(key, sheet)) {
-      setTimeout(() => AppCache.refreshStale(sheet), 0);
+      if (typeof requestIdleCallback !== 'undefined') {
+        requestIdleCallback(() => AppCache.refreshStale(sheet));
+      } else {
+        setTimeout(() => AppCache.refreshStale(sheet), 1000);
+      }
       return AppCache.get(key);
     }
     _showLoading();
@@ -204,7 +292,6 @@ const DB = {
     try {
       const r = await _post({ action: 'upsert', sheet, data });
       
-      // INVALIDASI CERDAS: Gunakan project_id jika tersedia
       const options = {};
       if (data.project_id) {
         options.projectId = data.project_id;
@@ -214,7 +301,13 @@ const DB = {
       }
       AppCache.invalidateRelated(sheet, options);
       
-      if (isPriority) setTimeout(() => { AppCache.refreshStale(sheet); }, 500);
+      if (isPriority) {
+        if (typeof requestIdleCallback !== 'undefined') {
+          requestIdleCallback(() => AppCache.refreshStale(sheet));
+        } else {
+          setTimeout(() => AppCache.refreshStale(sheet), 500);
+        }
+      }
       return r.row;
     } catch (error) {
       if (oldCache) AppCache.set(key, oldCache, sheet);
@@ -231,23 +324,27 @@ const DB = {
 
     _showLoading();
     try {
-      // Ambil data dulu untuk dapat project_id sebelum delete
       let projectId = null;
       try {
         const existing = await this.getById(sheet, id);
         if (existing && existing.project_id) {
           projectId = existing.project_id;
         }
-      } catch (e) { /* Abaikan jika gagal fetch existing */ }
+      } catch (e) { /* Abaikan */ }
       
       const r = await _post({ action: 'delete', sheet, id });
       
-      // INVALIDASI CERDAS
       const options = {};
       if (projectId) options.projectId = projectId;
       AppCache.invalidateRelated(sheet, options);
       
-      if (isPriority) setTimeout(() => { AppCache.refreshStale(sheet); }, 500);
+      if (isPriority) {
+        if (typeof requestIdleCallback !== 'undefined') {
+          requestIdleCallback(() => AppCache.refreshStale(sheet));
+        } else {
+          setTimeout(() => AppCache.refreshStale(sheet), 500);
+        }
+      }
       return r.deleted;
     } catch (error) {
       if (oldCache) AppCache.set(key, oldCache, sheet);
@@ -263,20 +360,25 @@ const DB = {
     try {
       const r = await _post({ action: 'deleteWhere', sheet, field, value });
       
-      // INVALIDASI CERDAS
       const options = {};
       if (field === 'project_id' && value) {
         options.projectId = value;
       }
       AppCache.invalidateRelated(sheet, options);
       
-      if (isPriority) setTimeout(() => AppCache.refreshStale(sheet), 500);
+      if (isPriority) {
+        if (typeof requestIdleCallback !== 'undefined') {
+          requestIdleCallback(() => AppCache.refreshStale(sheet));
+        } else {
+          setTimeout(() => AppCache.refreshStale(sheet), 500);
+        }
+      }
       return r.deleted;
     } finally { _hideLoading(); }
   },
 
+  // FIX: Batch upsert dengan chunking untuk mencegah timeout
   async batchUpsert(operations) {
-    // Kumpulkan sheets dan project_ids yang terpengaruh
     const affected = {};
     operations.forEach(op => {
       if (!op.sheet || !op.data) return;
@@ -288,30 +390,69 @@ const DB = {
     
     _showLoading();
     try {
-      const r = await _post({ action: 'batchUpsert', operations });
+      let allResults = [];
       
-      // INVALIDASI CERDAS per sheet dengan project_id spesifik
+      // FIX: Pecah batch besar menjadi chunk kecil
+      if (operations.length > MAX_BATCH_SIZE) {
+        console.log(`[DB] Batch upsert: ${operations.length} operations, splitting into chunks of ${MAX_BATCH_SIZE}`);
+        
+        const chunks = [];
+        for (let i = 0; i < operations.length; i += MAX_BATCH_SIZE) {
+          chunks.push(operations.slice(i, i + MAX_BATCH_SIZE));
+        }
+        
+        // Proses chunk satu per satu dengan timeout lebih panjang
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          console.log(`[DB] Processing chunk ${i + 1}/${chunks.length} (${chunk.length} items)...`);
+          
+          try {
+            const r = await _post({ action: 'batchUpsert', operations: chunk }, BATCH_TIMEOUT);
+            allResults = allResults.concat(r.rows || []);
+          } catch (err) {
+            console.error(`[DB] Chunk ${i + 1} failed:`, err.message);
+            
+            // FIX: Fallback ke upsert satu per satu untuk chunk yang gagal
+            console.log(`[DB] Falling back to individual upsert for chunk ${i + 1}`);
+            for (const op of chunk) {
+              try {
+                const singleResult = await this.upsert(op.sheet, op.data);
+                if (singleResult) allResults.push(singleResult);
+              } catch (singleErr) {
+                console.error(`[DB] Individual upsert failed:`, singleErr.message);
+              }
+            }
+          }
+        }
+      } else {
+        // Batch kecil, kirim langsung dengan timeout lebih panjang
+        const r = await _post({ action: 'batchUpsert', operations }, BATCH_TIMEOUT);
+        allResults = r.rows || [];
+      }
+      
+      // Invalidate cache
       Object.entries(affected).forEach(([sheet, projectIds]) => {
         if (projectIds.size > 0) {
-          // Invalidate per project
           projectIds.forEach(pid => {
             AppCache.invalidateRelated(sheet, { projectId: pid });
           });
         } else {
-          // Full invalidate jika tidak ada project_id
           AppCache.invalidateRelated(sheet);
         }
         if (AppCache.isPrioritySheet(sheet)) {
-          setTimeout(() => AppCache.refreshStale(sheet), 500);
+          if (typeof requestIdleCallback !== 'undefined') {
+            requestIdleCallback(() => AppCache.refreshStale(sheet));
+          } else {
+            setTimeout(() => AppCache.refreshStale(sheet), 500);
+          }
         }
       });
       
-      return r.rows;
+      return allResults;
     } finally { _hideLoading(); }
   },
 
   async batchDelete(operations) {
-    // Kumpulkan sheets yang terpengaruh
     const affected = {};
     operations.forEach(op => {
       if (!op.sheet) return;
@@ -323,9 +464,8 @@ const DB = {
     
     _showLoading();
     try {
-      const r = await _post({ action: 'batchDelete', operations });
+      const r = await _post({ action: 'batchDelete', operations }, BATCH_TIMEOUT);
       
-      // INVALIDASI CERDAS
       Object.entries(affected).forEach(([sheet, projectIds]) => {
         if (projectIds.size > 0) {
           projectIds.forEach(pid => {
@@ -335,7 +475,11 @@ const DB = {
           AppCache.invalidateRelated(sheet);
         }
         if (AppCache.isPrioritySheet(sheet)) {
-          setTimeout(() => AppCache.refreshStale(sheet), 500);
+          if (typeof requestIdleCallback !== 'undefined') {
+            requestIdleCallback(() => AppCache.refreshStale(sheet));
+          } else {
+            setTimeout(() => AppCache.refreshStale(sheet), 500);
+          }
         }
       });
       
@@ -349,8 +493,6 @@ const DB = {
     finally { _hideLoading(); }
   },
 
-  // Public wrapper atas _post() agar modul lain (login.js) bisa
-  // mengirim request dengan token tanpa mengakses fungsi private
   async post(body) {
     _showLoading();
     try { return await _post(body); }
@@ -358,11 +500,24 @@ const DB = {
   }
 };
 
+// ... (StorageService dan DataAccess tetap sama seperti sebelumnya)
+
 const StorageService = {
+  _dataCache: new Map(),
+  
   async getData(sheet) {
+    // PERFORMANCE: Cek cache StorageService dulu
+    const cacheKey = `storage_${sheet}`;
+    const cached = this._dataCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp) < 5000) { // 5 detik TTL
+      return cached.data;
+    }
+    
     try {
       const result = await DB.getAll(sheet);
-      return result.rows || [];
+      const data = result.rows || [];
+      this._dataCache.set(cacheKey, { data, timestamp: Date.now() });
+      return data;
     } catch (err) {
       console.error('[StorageService] getData error:', sheet, err);
       UIService.showToast('Gagal membaca data: ' + err.message, 'danger');
@@ -374,12 +529,15 @@ const StorageService = {
     try {
       const operations = dataArray.map(data => ({ sheet, data }));
       await DB.batchUpsert(operations);
+      // PERFORMANCE: Invalidate StorageService cache
+      this._dataCache.delete(`storage_${sheet}`);
       return true;
     } catch (err) {
       console.error('[StorageService] saveData error:', sheet, err);
       UIService.showToast('Gagal menyimpan data.', 'danger');
       try {
         for (const row of dataArray) await DB.upsert(sheet, row);
+        this._dataCache.delete(`storage_${sheet}`);
         return true;
       } catch (err2) {
         console.error('[StorageService] saveData fallback error:', sheet, err2);
@@ -416,6 +574,7 @@ const DataAccess = {
     if (!data || !data.name) return null;
     data.updated_at = new Date().toISOString();
     await DB.upsert('company', data);
+    StorageService._dataCache.delete('storage_company');
     StorageService.addAuditLog('UPDATE_COMPANY', 'Profil perusahaan diperbarui');
     return data;
   },
@@ -437,6 +596,7 @@ const DataAccess = {
     data.updated_at = new Date().toISOString();
     if (!data.created_at) data.created_at = new Date().toISOString();
     await DB.upsert('projects', data);
+    StorageService._dataCache.delete('storage_projects');
     StorageService.addAuditLog('SAVE_PROJECT', `Proyek ${data.name} disimpan`);
     return data;
   },
@@ -452,8 +612,8 @@ const DataAccess = {
     }
     finally { _hideLoading(); }
     
-    // INVALIDASI CERDAS: Gunakan project_id spesifik
     AppCache.invalidateRelated('projects', { projectId });
+    StorageService._dataCache.delete('storage_projects');
     StorageService.addAuditLog('DELETE_PROJECT', `Proyek ${id} beserta data terkait dihapus`);
     return true;
   },
@@ -476,6 +636,7 @@ const DataAccess = {
     data.updated_at = new Date().toISOString();
     if (!data.created_at) data.created_at = new Date().toISOString();
     await DB.upsert('jsa', data);
+    StorageService._dataCache.delete('storage_jsa');
     StorageService.addAuditLog('SAVE_JSA', `JSA ${data.document_number || data.id} disimpan`);
     return data;
   },
@@ -483,6 +644,7 @@ const DataAccess = {
   async deleteJSA(id) {
     if (!id) return false;
     await DB.delete('jsa', id);
+    StorageService._dataCache.delete('storage_jsa');
     return true;
   },
 
@@ -504,6 +666,7 @@ const DataAccess = {
     data.updated_at = new Date().toISOString();
     if (!data.created_at) data.created_at = new Date().toISOString();
     await DB.upsert('work_methods', data);
+    StorageService._dataCache.delete('storage_work_methods');
     StorageService.addAuditLog('SAVE_WORK_METHOD', `WM ${data.document_number || data.id} disimpan`);
     return data;
   },
@@ -513,6 +676,7 @@ const DataAccess = {
     await DB.delete('work_methods', id);
     await DB.deleteWhere('jadwal', 'work_method_id', id);
     AppCache.invalidate('jadwal');
+    StorageService._dataCache.delete('storage_work_methods');
     return true;
   },
 
@@ -526,7 +690,6 @@ const DataAccess = {
     if (!rows || rows.length === 0) return [];
     const now = new Date().toISOString();
     
-    // Kumpulkan project_id yang terpengaruh
     const affectedProjects = new Set();
     
     const operations = rows.map(row => {
@@ -549,7 +712,6 @@ const DataAccess = {
     });
     const result = await DB.batchUpsert(operations);
     
-    // INVALIDASI CERDAS: Per project
     affectedProjects.forEach(pid => {
       AppCache.invalidateRelated('jadwal', { projectId: pid });
     });
@@ -570,6 +732,7 @@ const DataAccess = {
     if (!data || !data.id) return null;
     data.updated_at = new Date().toISOString();
     await DB.upsert('personnel', data);
+    StorageService._dataCache.delete('storage_personnel');
     StorageService.addAuditLog('SAVE_PERSONNEL', `Personel ${data.name} disimpan`);
     return data;
   },
@@ -580,6 +743,7 @@ const DataAccess = {
     AppCache.invalidate('manpower');
     await DB.delete('personnel', id);
     AppCache.invalidate('personnel');
+    StorageService._dataCache.delete('storage_personnel');
     StorageService.addAuditLog('DELETE_PERSONNEL', `Personel ${id} dihapus`);
     return true;
   },
@@ -617,7 +781,6 @@ const DataAccess = {
     }));
     if (operations.length > 0) await DB.batchUpsert(operations);
     
-    // INVALIDASI CERDAS: Hanya untuk proyek spesifik
     AppCache.invalidateRelated('manpower', { projectId: project_id });
     return personnel_ids;
   },
@@ -625,7 +788,6 @@ const DataAccess = {
   async deleteManpowerByProject(projectId) {
     if (!projectId) return false;
     await DB.deleteWhere('manpower', 'project_id', projectId);
-    // INVALIDASI CERDAS: Hanya untuk proyek spesifik
     AppCache.invalidateRelated('manpower', { projectId });
     return true;
   },
@@ -648,13 +810,13 @@ const DataAccess = {
     data.updated_at = new Date().toISOString();
     if (!data.created_at) data.created_at = new Date().toISOString();
     await DB.upsert('procurement', data);
+    StorageService._dataCache.delete('storage_procurement');
     return data;
   },
 
   async saveMultiplePO(poArray) {
     if (!poArray || poArray.length === 0) return [];
     
-    // Kumpulkan project_id yang terpengaruh
     const affectedProjects = new Set();
     
     const operations = poArray.map(po => {
@@ -670,7 +832,6 @@ const DataAccess = {
     });
     const results = await DB.batchUpsert(operations);
     
-    // INVALIDASI CERDAS: Per project
     affectedProjects.forEach(pid => {
       AppCache.invalidateRelated('procurement', { projectId: pid });
     });
@@ -681,6 +842,7 @@ const DataAccess = {
   async deletePO(id) {
     if (!id) return false;
     await DB.delete('procurement', id);
+    StorageService._dataCache.delete('storage_procurement');
     return true;
   },
 
@@ -688,11 +850,13 @@ const DataAccess = {
 
   async saveAccount(data) {
     await DB.upsert('accounts', data);
+    StorageService._dataCache.delete('storage_accounts');
     return data;
   },
 
   async deleteAccount(username) {
     await DB.deleteWhere('accounts', 'username', username);
+    StorageService._dataCache.delete('storage_accounts');
     return true;
   }
 };

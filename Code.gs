@@ -19,6 +19,9 @@ const DATE_ONLY_FIELDS = new Set([
   'start_date', 'end_date', 'birth_date', 'date'
 ]);
 
+// Timezone Jakarta (GMT+7) dalam milidetik
+const JAKARTA_OFFSET_MS = 7 * 60 * 60 * 1000;
+
 let _ssCache = null;
 function _getSpreadsheet() {
   if (!_ssCache) _ssCache = SpreadsheetApp.openById(SHEET_ID);
@@ -480,15 +483,19 @@ function getOrCreateSheet(sheetName) {
  * yang hanya menerima format "yyyy-MM-dd".
  * 
  * SEKARANG: Kolom yang ada di DATE_ONLY_FIELDS dikembalikan sebagai "yyyy-MM-dd".
+ * Menggunakan waktu Jakarta (GMT+7) untuk memastikan tanggal yang ditampilkan
+ * sesuai dengan locale Indonesia, bukan UTC.
  * Kolom lain (created_at, updated_at) tetap sebagai ISO string penuh.
  */
 function _parseValue(v, fieldName) {
   if (v instanceof Date) {
     if (fieldName && DATE_ONLY_FIELDS.has(fieldName)) {
-      // Kembalikan sebagai yyyy-MM-dd — gunakan UTC agar tidak terpengaruh timezone server
-      const yyyy = v.getUTCFullYear();
-      const mm   = String(v.getUTCMonth() + 1).padStart(2, '0');
-      const dd   = String(v.getUTCDate()).padStart(2, '0');
+      // Kembalikan sebagai yyyy-MM-dd menggunakan waktu Jakarta (GMT+7)
+      // agar tanggal tidak mundur 1 hari karena perbedaan timezone
+      const jakartaTime = new Date(v.getTime() + JAKARTA_OFFSET_MS);
+      const yyyy = jakartaTime.getUTCFullYear();
+      const mm   = String(jakartaTime.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(jakartaTime.getUTCDate()).padStart(2, '0');
       return `${yyyy}-${mm}-${dd}`;
     }
     return v.toISOString();
@@ -504,21 +511,69 @@ function _parseValue(v, fieldName) {
   return v;
 }
 
-function rowToObj(headers, row) {
-  const obj = {};
-  headers.forEach((h, i) => { obj[h] = _parseValue(row[i], h); });
-  return obj;
-}
-
+/**
+ * FIX: Konversi data dari objek ke row untuk disimpan di Google Sheets.
+ * Untuk kolom tanggal (DATE_ONLY_FIELDS), kita perlu memastikan data disimpan
+ * sebagai string "yyyy-MM-dd" agar tidak terjadi konversi timezone oleh Google Sheets.
+ * 
+ * Jika data sudah dalam format string "yyyy-MM-dd", simpan sebagai string.
+ * Jika data adalah ISO string atau Date object, konversi ke "yyyy-MM-dd" waktu Jakarta.
+ */
 function objToRow(headers, obj) {
   return headers.map(h => {
     let v = obj[h];
     if (v === undefined || v === null) return '';
-    if (typeof v === 'object')         return JSON.stringify(v);
+    
+    // Untuk kolom tanggal-only, pastikan format yyyy-MM-dd
+    if (DATE_ONLY_FIELDS.has(h) && v) {
+      const dateStr = _toJakartaDateString(v);
+      if (dateStr) return dateStr;
+    }
+    
+    if (typeof v === 'object') return JSON.stringify(v);
     // Cegah injeksi formula Google Sheets
     const s = String(v);
     return s.startsWith('=') ? "'" + s : s;
   });
+}
+
+/**
+ * Konversi berbagai format tanggal ke string yyyy-MM-dd waktu Jakarta
+ */
+function _toJakartaDateString(v) {
+  if (!v) return '';
+  
+  let dateObj = null;
+  
+  if (v instanceof Date) {
+    dateObj = v;
+  } else if (typeof v === 'string') {
+    // Cek apakah sudah format yyyy-MM-dd
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      return v; // Sudah benar, kembalikan apa adanya
+    }
+    // Coba parse ISO string atau format lainnya
+    dateObj = new Date(v);
+    if (isNaN(dateObj.getTime())) return '';
+  } else if (typeof v === 'number') {
+    dateObj = new Date(v);
+    if (isNaN(dateObj.getTime())) return '';
+  }
+  
+  if (!dateObj || isNaN(dateObj.getTime())) return '';
+  
+  // Konversi ke waktu Jakarta (GMT+7)
+  const jakartaTime = new Date(dateObj.getTime() + JAKARTA_OFFSET_MS);
+  const yyyy = jakartaTime.getUTCFullYear();
+  const mm   = String(jakartaTime.getUTCMonth() + 1).padStart(2, '0');
+  const dd   = String(jakartaTime.getUTCDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function rowToObj(headers, row) {
+  const obj = {};
+  headers.forEach((h, i) => { obj[h] = _parseValue(row[i], h); });
+  return obj;
 }
 
 // ─────────────────────────────────────────────────────────────

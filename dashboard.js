@@ -121,3 +121,6 @@ const DashboardPage = {
     }
   }
 };
+
+// Di akhir dashboard.js, tambahkan:
+export { DashboardPage };

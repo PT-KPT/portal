@@ -229,3 +229,5 @@ const ProjectPage = {
     );
   }
 };
+// Di akhir proyek.js, tambahkan:
+export { ProjectPage };

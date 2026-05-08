@@ -784,6 +784,32 @@ body::before {
 .permit-item__icon { font-size: 1.2rem; }
 .permit-item__label { font-weight: 500; }
 
+/* ============================================================
+   Tabel pembungkus laporan — thead berulang di setiap halaman cetak
+   ============================================================ */
+.report-page-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+/* Header cell: tampilan layar — seperti div biasa */
+.report-page-table > thead > tr > th {
+  padding: 0;
+  font-weight: normal;
+  border: none;
+  background: transparent;
+  vertical-align: top;
+}
+
+/* Body cell: tidak ada border/padding tambahan */
+.report-page-table > tbody > tr > td {
+  padding: 0;
+  border: none;
+  background: transparent;
+  vertical-align: top;
+}
+
 .report-container { background: white; padding: var(--spacing-xl); max-width: 826px; margin: 0 auto; }
 .report-header { margin-bottom: var(--spacing-xl); padding-bottom: var(--spacing-md); border-bottom: 2px solid var(--color-text); }
 .report-header__layout { display: flex; gap: var(--spacing-md); align-items: start; }
@@ -1070,6 +1096,25 @@ body::before {
 }
 
 @media print {
+  @page {
+    size: A4 portrait;
+    margin: 14mm 12mm 16mm 12mm;
+  }
+
+  @page :first {
+    margin-top: 10mm;
+  }
+
+  /* Nomor halaman di footer */
+  .report-container {
+    counter-reset: page-counter;
+  }
+
+  .report-footer-pagenum::after {
+    content: counter(page);
+    counter-increment: page;
+  }
+
   *, *::before, *::after { 
     box-shadow: none !important; 
     text-shadow: none !important; 
@@ -1217,6 +1262,45 @@ body::before {
   .badge--risk-high { background: #fee2e2 !important; color: #991b1b !important; }
   .badge--risk-extreme { background: #fecaca !important; color: #7f1d1d !important; font-weight: 700; }
   
+  /* ============================================================
+     Tabel pembungkus — paksa <thead> berulang di setiap halaman
+     ============================================================ */
+  .report-page-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: fixed !important;
+  }
+
+  .report-page-table > thead {
+    display: table-header-group !important; /* Standar CSS untuk repeat header */
+  }
+
+  .report-page-table > thead > tr > th {
+    padding: 0 !important;
+    font-weight: normal !important;
+    border: none !important;
+    background: transparent !important;
+    /* Tambah garis pemisah tipis di bawah header di setiap halaman */
+    border-bottom: 2px solid #0f172a !important;
+    padding-bottom: 0.5rem !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .report-page-table > tbody > tr > td {
+    padding: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    vertical-align: top !important;
+  }
+
+  /* Override: pastikan .report-header di dalam thead tidak double border */
+  .report-page-table .report-header {
+    border-bottom: none !important;
+    margin-bottom: 0.5rem !important;
+    padding-bottom: 0.25rem !important;
+  }
+
   .report-header {
     border-bottom: 2px solid #0f172a !important;
     margin-bottom: 1rem !important;
@@ -1278,7 +1362,8 @@ body::before {
   
   .report-header__date { 
     font-size: 8pt !important; 
-    color: #94a3b8 !important; 
+    color: #64748b !important;
+    margin-top: 4px !important;
   }
   
   .report-section-title {
@@ -1369,7 +1454,77 @@ body::before {
     border-top: 1px solid #cbd5e1 !important; 
     color: #94a3b8 !important; 
   }
-  
+
+  /* Footer otomatis di setiap halaman cetak */
+  .report-container::after {
+    content: "Dokumen ini dicetak dari KPT Project Management Portal";
+    display: block;
+    margin-top: 2rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #cbd5e1;
+    font-size: 7pt;
+    color: #94a3b8;
+    text-align: center;
+  }
+
+  /* ============================================================
+     Jadwal Kerja — seluruh halaman cetak landscape
+     @page named rule berlaku untuk semua halaman yang mengandung
+     elemen dengan property page: jadwal-landscape
+     ============================================================ */
+  .report-container--landscape {
+    page: jadwal-landscape;
+  }
+
+  @page jadwal-landscape {
+    size: A4 landscape;
+    margin: 10mm 10mm 12mm 10mm;
+  }
+
+  /* Gantt container — tidak perlu @page sendiri, ikut container */
+  .gantt-print-landscape {
+    /* class tetap ada untuk JS reference, page rule dihapus */
+  }
+
+  /* Override dari style.css — gantt-renderer.js sudah handle sendiri */
+  .gantt-wrapper {
+    overflow: visible !important;
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  .gantt-table {
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
+  .gantt-task-label {
+    position: static !important;
+    white-space: normal !important;
+    word-break: break-word !important;
+    overflow: visible !important;
+  }
+
+  .gantt-table thead th.gantt-label-header {
+    position: static !important;
+  }
+
+  /* Kolom tanggal Cost Project disembunyikan saat cetak */
+  .no-print {
+    display: none !important;
+  }
+
+  /* Blok per-dokumen: header info (nomor, tanggal) dilindungi, isi tabel bebas mengalir */
+  .report-doc-block {
+    page-break-before: auto;
+  }
+
+  /* Lindungi hanya bagian atas blok dokumen (info singkat) dari page-break */
+  .report-doc-block__header {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
   .flow-guard-banner {
     page-break-inside: avoid;
   }
@@ -1386,10 +1541,28 @@ body::before {
     page-break-after: avoid; 
   }
   
-  tr { 
-    page-break-inside: avoid; 
+  /* Baris pendek (info, signature, summary) — boleh avoid */
+  .table-sm tr {
+    page-break-inside: avoid;
   }
-  
+
+  /* Tabel data besar (hazard, langkah kerja) — biarkan mengalir natural */
+  .table--data-flow tr {
+    page-break-inside: auto !important;
+  }
+
+  /* Hanya header tabel data yang dilindungi dari terpotong */
+  .table--data-flow thead tr {
+    page-break-inside: avoid;
+    page-break-after: avoid;
+  }
+
+  /* Setiap baris data boleh terpotong antar halaman */
+  .table--data-flow tbody tr {
+    page-break-inside: auto !important;
+    break-inside: auto !important;
+  }
+
   .card { 
     page-break-inside: avoid; 
   }
