@@ -1,3 +1,9 @@
+// metode.js — ES6 Module
+import { ROUTES, TOAST } from './constants.js';
+import { DataAccess } from './db.js';
+import { AppError } from './error-handler.js';
+import { UtilityService, UIService } from './main.js';
+
 const WorkMethodPage = {
   _currentWorkMethod: null,
   _currentStep: 1,
@@ -282,5 +288,4 @@ const WorkMethodPage = {
     });
   }
 };
-// Di akhir metode.js, tambahkan:
 export { WorkMethodPage };

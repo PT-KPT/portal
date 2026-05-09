@@ -1,4 +1,6 @@
-// download.js — Fitur Download PDF untuk Laporan
+// download.js — ES6 Module — Download PDF
+import { DataAccess } from './db.js';
+import { UtilityService } from './main.js';
 
 const DownloadPage = {
   _selectedProjectId: null,
@@ -562,5 +564,5 @@ const DownloadPage = {
   }
 };
 
-// Export ke global scope
+export { DownloadPage };
 window.DownloadPage = DownloadPage;

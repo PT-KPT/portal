@@ -1,4 +1,8 @@
-// jadwal.js — Jadwal Kerja (Sheet: jadwal) — v3.1 dengan fix timeout
+// jadwal.js — ES6 Module — Jadwal Kerja v3.1
+import { ROUTES, TOAST, SHEETS } from './constants.js';
+import { DataAccess } from './db.js';
+import { AppError } from './error-handler.js';
+import { UtilityService, UIService } from './main.js';
 
 const SchedulePage = {
   _currentProjectId: null,
@@ -532,5 +536,4 @@ const SchedulePage = {
   }
 };
 
-// Di akhir jadwal.js, tambahkan:
 export { SchedulePage };

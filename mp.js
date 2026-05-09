@@ -1,4 +1,8 @@
-// mp.js — Manpower: master personel + assignment per proyek (Optimized with Event Delegation)
+// mp.js — ES6 Module — Manpower
+import { ROUTES, TOAST, ERR } from './constants.js';
+import { DataAccess } from './db.js';
+import { AppError } from './error-handler.js';
+import { UtilityService, UIService } from './main.js';
 
 const ManpowerPage = {
   _personnel: [],
@@ -434,5 +438,4 @@ const ManpowerPage = {
     );
   }
 };
-// Di akhir mp.js, tambahkan:
 export { ManpowerPage };

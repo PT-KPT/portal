@@ -1,3 +1,9 @@
+// proyek.js — ES6 Module
+import { ROUTES, TOAST, ERR } from './constants.js';
+import { DataAccess } from './db.js';
+import { AppError } from './error-handler.js';
+import { UtilityService, UIService } from './main.js';
+
 const ProjectPage = {
   _tableClickHandler: null,
   _cardClickHandler: null,
@@ -229,5 +235,4 @@ const ProjectPage = {
     );
   }
 };
-// Di akhir proyek.js, tambahkan:
 export { ProjectPage };

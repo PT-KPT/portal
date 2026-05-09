@@ -58,6 +58,25 @@ function doGet(e) {
     if (action === 'getStats') return jsonOk(getDashboardStats());
     if (action === 'getRecent')return jsonOk(getRecentOptimized(e.parameter.sheet, parseInt(e.parameter.limit) || 5));
     if (action === 'getSummary')return jsonOk(getProjectSummary(e.parameter.projectId));
+    
+    // 🆕 BULK ENDPOINT — 1 request untuk multiple sheets
+    if (action === 'getBulk') {
+      const sheets = (e.parameter.sheets || '').split(',').filter(function(s) { return s.trim() !== ''; });
+      const results = {};
+      sheets.forEach(function(sheetName) {
+        if (SHEETS[sheetName]) {
+          try {
+            results[sheetName] = getAllOptimized(sheetName, {});
+          } catch (err) {
+            results[sheetName] = { rows: [], total: 0, error: err.toString() };
+          }
+        } else {
+          results[sheetName] = { rows: [], total: 0 };
+        }
+      });
+      return jsonOk(results);
+    }
+    
     return jsonErr('Unknown GET action: ' + action);
   } catch (err) { return jsonErr(err.toString()); }
 }
@@ -97,22 +116,22 @@ function getAllOptimized(sheetName, opts) {
   if (lastRow < 2) return result;
 
   // Tentukan kolom yang akan dikembalikan (partial select)
-  let colIndices  = headers.map((_, i) => i);
+  let colIndices  = headers.map(function(_, i) { return i; });
   let readHeaders = headers;
   if (opts.fields && opts.fields.length > 0) {
-    const mapped = opts.fields.map(f => headers.indexOf(f)).filter(i => i !== -1);
-    if (mapped.length > 0) { colIndices = mapped; readHeaders = opts.fields.filter(f => headers.indexOf(f) !== -1); }
+    const mapped = opts.fields.map(function(f) { return headers.indexOf(f); }).filter(function(i) { return i !== -1; });
+    if (mapped.length > 0) { colIndices = mapped; readHeaders = opts.fields.filter(function(f) { return headers.indexOf(f) !== -1; }); }
   }
 
   const values   = ws.getRange(2, 1, lastRow - 1, headers.length).getValues();
-  let   filtered = values.filter(row => row[0] !== '' && row[0] !== null && row[0] !== undefined);
+  let   filtered = values.filter(function(row) { return row[0] !== '' && row[0] !== null && row[0] !== undefined; });
   result.total   = filtered.length;
 
   // Filter
   if (opts.filterField && opts.filterValue !== undefined && opts.filterValue !== null && opts.filterValue !== '') {
     const ci = headers.indexOf(opts.filterField);
     if (ci !== -1) {
-      filtered     = filtered.filter(row => String(row[ci]) === String(opts.filterValue));
+      filtered     = filtered.filter(function(row) { return String(row[ci]) === String(opts.filterValue); });
       result.total = filtered.length;
     }
   }
@@ -120,7 +139,7 @@ function getAllOptimized(sheetName, opts) {
     const ci          = headers.indexOf(opts.searchField);
     const searchLower = String(opts.searchValue).toLowerCase();
     if (ci !== -1) {
-      filtered     = filtered.filter(row => row[ci] && String(row[ci]).toLowerCase().includes(searchLower));
+      filtered     = filtered.filter(function(row) { return row[ci] && String(row[ci]).toLowerCase().indexOf(searchLower) !== -1; });
       result.total = filtered.length;
     }
   }
@@ -129,7 +148,7 @@ function getAllOptimized(sheetName, opts) {
   const dateCI    = headers.indexOf('updated_at');
   const createdCI = headers.indexOf('created_at');
   if (dateCI !== -1 || createdCI !== -1) {
-    filtered.sort((a, b) => {
+    filtered.sort(function(a, b) {
       const rawA = (dateCI !== -1 ? a[dateCI] : null) || (createdCI !== -1 ? a[createdCI] : null) || '';
       const rawB = (dateCI !== -1 ? b[dateCI] : null) || (createdCI !== -1 ? b[createdCI] : null) || '';
       const tA   = rawA ? (rawA instanceof Date ? rawA.getTime() : new Date(rawA).getTime()) : 0;
@@ -142,10 +161,10 @@ function getAllOptimized(sheetName, opts) {
   if (opts.limit > 0) filtered = filtered.slice(opts.offset || 0, (opts.offset || 0) + opts.limit);
 
   // Map ke objek
-  result.rows = filtered.map(row => {
+  result.rows = filtered.map(function(row) {
     if (opts.fields && colIndices.length > 0 && colIndices.length < headers.length) {
       const obj = {};
-      colIndices.forEach((ci, i) => { obj[readHeaders[i]] = _parseValue(row[ci], readHeaders[i]); });
+      colIndices.forEach(function(ci, i) { obj[readHeaders[i]] = _parseValue(row[ci], readHeaders[i]); });
       return obj;
     }
     return rowToObj(headers, row);
@@ -166,13 +185,13 @@ function getRecentOptimized(sheetName, limit) {
   if (lastRow < 2) return { rows: [], total: 0 };
 
   const values   = ws.getRange(2, 1, lastRow - 1, headers.length).getValues();
-  let   filtered = values.filter(row => row[0] !== '' && row[0] !== null && row[0] !== undefined);
+  let   filtered = values.filter(function(row) { return row[0] !== '' && row[0] !== null && row[0] !== undefined; });
 
   // Sort by updated_at DESC lalu created_at DESC
   const dateCI    = headers.indexOf('updated_at');
   const createdCI = headers.indexOf('created_at');
   if (dateCI !== -1 || createdCI !== -1) {
-    filtered.sort((a, b) => {
+    filtered.sort(function(a, b) {
       const rawA = (dateCI !== -1 ? a[dateCI] : null) || (createdCI !== -1 ? a[createdCI] : null) || '';
       const rawB = (dateCI !== -1 ? b[dateCI] : null) || (createdCI !== -1 ? b[createdCI] : null) || '';
       const tA   = rawA ? (rawA instanceof Date ? rawA.getTime() : new Date(rawA).getTime()) : 0;
@@ -182,7 +201,7 @@ function getRecentOptimized(sheetName, limit) {
   }
 
   const top = filtered.slice(0, limit);
-  return { rows: top.map(row => rowToObj(headers, row)), total: filtered.length };
+  return { rows: top.map(function(row) { return rowToObj(headers, row); }), total: filtered.length };
 }
 
 function getById(sheetName, id) {
@@ -208,13 +227,13 @@ function getCount(sheetName) {
   const col     = idCol !== -1 ? idCol + 1 : headers.indexOf('username') + 1;
   if (col === 0) return 0;
   const vals = ws.getRange(2, col, lastRow - 1, 1).getValues().flat();
-  return vals.filter(v => v !== null && v !== undefined && String(v).trim() !== '').length;
+  return vals.filter(function(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }).length;
 }
 
 function getCounts(sheetNames) {
   const ss     = _getSpreadsheet();
   const counts = {};
-  sheetNames.forEach(name => {
+  sheetNames.forEach(function(name) {
     if (!SHEETS[name]) { counts[name] = 0; return; }
     const cfg = SHEETS[name];
     const ws  = ss.getSheetByName(cfg.name);
@@ -223,7 +242,7 @@ function getCounts(sheetNames) {
     const col   = idCol !== -1 ? idCol + 1 : cfg.headers.indexOf('username') + 1;
     if (col === 0) { counts[name] = 0; return; }
     const vals  = ws.getRange(2, col, ws.getLastRow() - 1, 1).getValues().flat();
-    counts[name] = vals.filter(v => v !== null && v !== undefined && String(v).trim() !== '').length;
+    counts[name] = vals.filter(function(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }).length;
   });
   return counts;
 }
@@ -232,13 +251,13 @@ function getDashboardStats() {
   const ss         = _getSpreadsheet();
   const sheetNames = ['projects', 'jsa', 'work_methods', 'procurement', 'manpower'];
   const counts     = {};
-  sheetNames.forEach(name => {
+  sheetNames.forEach(function(name) {
     const ws = ss.getSheetByName(SHEETS[name].name);
     if (!ws || ws.getLastRow() < 2) { counts[name] = 0; return; }
     const idCol = SHEETS[name].headers.indexOf('id') + 1;
     if (idCol === 0) { counts[name] = 0; return; }
     const vals  = ws.getRange(2, idCol, ws.getLastRow() - 1, 1).getValues().flat();
-    counts[name] = vals.filter(v => v !== null && v !== undefined && String(v).trim() !== '').length;
+    counts[name] = vals.filter(function(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }).length;
   });
   return {
     totalProjects:    counts['projects'],
@@ -260,7 +279,7 @@ function getProjectSummary(projectId) {
     const projCol = SHEETS[sheetName].headers.indexOf('project_id');
     if (projCol === -1) continue;
     const vals       = ws.getRange(2, projCol + 1, ws.getLastRow() - 1, 1).getValues().flat();
-    summary[countKey] = vals.filter(v => String(v) === String(projectId)).length;
+    summary[countKey] = vals.filter(function(v) { return String(v) === String(projectId); }).length;
   }
   return summary;
 }
@@ -347,7 +366,7 @@ function deleteWhere(sheetName, field, value) {
 function batchUpsert(operations) {
   const results = [];
   const grouped = {};
-  operations.forEach(op => {
+  operations.forEach(function(op) {
     if (!op.sheet || !op.data) return;
     if (!grouped[op.sheet]) grouped[op.sheet] = [];
     grouped[op.sheet].push(op.data);
@@ -361,7 +380,7 @@ function batchUpsert(operations) {
 
     // Sheet tanpa id — fallback ke upsert satu per satu
     if (idCol === -1) {
-      dataArray.forEach(data => results.push(upsert(sheetName, data)));
+      dataArray.forEach(function(data) { results.push(upsert(sheetName, data)); });
       continue;
     }
 
@@ -370,12 +389,12 @@ function batchUpsert(operations) {
     const existingIds = {};
     if (lastRow >= 2) {
       const idVals = ws.getRange(2, idCol + 1, lastRow - 1, 1).getValues();
-      idVals.forEach((v, i) => { if (v[0] !== '' && v[0] !== null) existingIds[String(v[0])] = i + 2; });
+      idVals.forEach(function(v, i) { if (v[0] !== '' && v[0] !== null) existingIds[String(v[0])] = i + 2; });
     }
 
     // Pisahkan: yang sudah ada (update) dan yang baru (insert)
     const newRows = [];
-    dataArray.forEach(data => {
+    dataArray.forEach(function(data) {
       const rowNum = existingIds[String(data.id)];
       if (rowNum) {
         ws.getRange(rowNum, 1, 1, headers.length).setValues([objToRow(headers, data)]);
@@ -397,7 +416,7 @@ function batchUpsert(operations) {
 function batchDelete(operations) {
   let totalDeleted = 0;
   const grouped    = {};
-  operations.forEach(op => {
+  operations.forEach(function(op) {
     const key = op.sheet + '::' + op.field;
     if (!grouped[key]) grouped[key] = { sheet: op.sheet, field: op.field, values: [] };
     grouped[key].values.push(String(op.value));
@@ -412,7 +431,7 @@ function batchDelete(operations) {
     const vals       = ws.getRange(2, col + 1, lastRow - 1, 1).getValues();
     const targetSet  = new Set(grp.values);
     const rowsToDelete = [];
-    vals.forEach((v, i) => { if (targetSet.has(String(v[0]))) rowsToDelete.push(i + 2); });
+    vals.forEach(function(v, i) { if (targetSet.has(String(v[0]))) rowsToDelete.push(i + 2); });
     // Hapus dari bawah ke atas
     for (let i = rowsToDelete.length - 1; i >= 0; i--) { ws.deleteRow(rowsToDelete[i]); totalDeleted++; }
   }
@@ -421,7 +440,7 @@ function batchDelete(operations) {
 
 function deleteProjectCascade(projectId) {
   if (!projectId) throw new Error('projectId wajib diisi');
-  ['jsa', 'work_methods', 'procurement', 'manpower', 'jadwal'].forEach(sheetName => {
+  ['jsa', 'work_methods', 'procurement', 'manpower', 'jadwal'].forEach(function(sheetName) {
     deleteWhere(sheetName, 'project_id', projectId);
   });
   deleteRow('projects', projectId);
@@ -434,7 +453,7 @@ function deleteProjectCascade(projectId) {
 
 function initAllSheets() {
   const ss = _getSpreadsheet();
-  Object.values(SHEETS).forEach(cfg => {
+  Object.values(SHEETS).forEach(function(cfg) {
     let ws = ss.getSheetByName(cfg.name);
     if (!ws) ws = ss.insertSheet(cfg.name);
     if (ws.getLastRow() === 0 || ws.getRange(1, 1).getValue() !== cfg.headers[0]) {
@@ -520,7 +539,7 @@ function _parseValue(v, fieldName) {
  * Jika data adalah ISO string atau Date object, konversi ke "yyyy-MM-dd" waktu Jakarta.
  */
 function objToRow(headers, obj) {
-  return headers.map(h => {
+  return headers.map(function(h) {
     let v = obj[h];
     if (v === undefined || v === null) return '';
     
@@ -572,7 +591,7 @@ function _toJakartaDateString(v) {
 
 function rowToObj(headers, row) {
   const obj = {};
-  headers.forEach((h, i) => { obj[h] = _parseValue(row[i], h); });
+  headers.forEach(function(h, i) { obj[h] = _parseValue(row[i], h); });
   return obj;
 }
 
@@ -584,7 +603,7 @@ function hashPassword(password) {
   const raw = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256, password, Utilities.Charset.UTF_8
   );
-  return raw.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
+  return raw.map(function(b) { return ('0' + (b & 0xFF).toString(16)).slice(-2); }).join('');
 }
 
 function handleLogin(username, password) {
@@ -640,7 +659,7 @@ function handleSaveAccount(payload) {
 
     if (lastRow >= 2) {
       const values = ws.getRange(2, 1, lastRow - 1, headers.length).getValues();
-      const row    = values.find(r => String(r[uCol] || '').toLowerCase() === targetUser.toLowerCase());
+      const row    = values.find(function(r) { return String(r[uCol] || '').toLowerCase() === targetUser.toLowerCase(); });
       if (row) finalPasswordHash = String(row[pwCol]);
     }
     if (!finalPasswordHash) throw new Error('Password wajib diisi untuk akun baru.');

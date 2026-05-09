@@ -1,3 +1,9 @@
+// perusahaan.js — ES6 Module
+import { EL, ROUTES, TOAST } from './constants.js';
+import { DataAccess } from './db.js';
+import { AppError } from './error-handler.js';
+import { UtilityService, UIService } from './main.js';
+
 const CompanyPage = {
   render() {
     return `
@@ -84,5 +90,4 @@ const CompanyPage = {
     }
   }
 };
-// Di akhir perusahaan.js, tambahkan:
 export { CompanyPage };

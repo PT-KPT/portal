@@ -1,3 +1,9 @@
+// dashboard.js — ES6 Module
+import { EL, ROUTES, SHEETS } from './constants.js';
+import { DB, DataAccess } from './db.js';
+import { AppError } from './error-handler.js';
+import { UtilityService, UIService } from './main.js';
+
 const DashboardPage = {
   render() {
     return `
@@ -122,5 +128,4 @@ const DashboardPage = {
   }
 };
 
-// Di akhir dashboard.js, tambahkan:
 export { DashboardPage };

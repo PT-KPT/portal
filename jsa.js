@@ -1,3 +1,9 @@
+// jsa.js — ES6 Module
+import { ROUTES, TOAST, SHEETS } from './constants.js';
+import { DB, DataAccess } from './db.js';
+import { AppError } from './error-handler.js';
+import { UtilityService, UIService, WORK_TYPE_APD } from './main.js';
+
 const JSAPage = {
   _currentJSA: null,
   _currentStep: 1,
@@ -327,5 +333,4 @@ const JSAPage = {
     });
   }
 };
-// Di akhir jsa.js, tambahkan:
 export { JSAPage };
