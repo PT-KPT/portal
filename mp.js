@@ -125,7 +125,7 @@ const ManpowerPage = {
               <table class="table table--hover mb-0">
                 <thead>
                   <tr>
-                    <th class="col-width-40">No</th>
+                    <th class="col-width-30">No</th>
                     <th>Nama</th>
                     <th>NIK</th>
                     <th>Tgl Lahir</th>
@@ -257,7 +257,7 @@ const ManpowerPage = {
     content.innerHTML = '<div class="card">'
       + '<div class="card-header"><i class="bi bi-people"></i> Personel — <strong>'
       + UtilityService.escapeHtml(project?.name||'') + '</strong>'
-      + '<span class="ms-2 text-muted" style="font-size:.78rem;" id="assignCountLabel">'
+      + '<span class="ms-2 text-muted" style="font-size:.7rem;" id="assignCountLabel">'
       + assigned.size + ' / ' + this._personnel.length + ' dipilih</span>'
       + '</div>'
       + '<div class="card-body p-0"><div class="table-responsive">'
@@ -268,7 +268,7 @@ const ManpowerPage = {
       + '</tr></thead><tbody>' + rows + '</tbody></table>'
       + '</div></div>'
       + '<div class="card-footer d-flex justify-content-between align-items-center">'
-      + '<span class="text-muted" style="font-size:.78rem;"><i class="bi bi-info-circle"></i>'
+      + '<span class="text-muted" style="font-size:.7rem;"><i class="bi bi-info-circle"></i>'
       + ' Centang personel yang bertugas di proyek ini</span>'
       + '<button class="btn btn--primary" onclick="ManpowerPage.saveAssignment()">'
       + '<i class="bi bi-save"></i> Simpan Penugasan</button>'
@@ -343,13 +343,13 @@ const ManpowerPage = {
       const projCount = assignCount[p.id] || 0;
       const projBadge = projCount > 0
         ? '<span class="badge bg-success">' + projCount + ' proyek</span>'
-        : '<span class="text-muted" style="font-size:.75rem;">—</span>';
+        : '<span class="text-muted" style="font-size:.7rem;">—</span>';
       return '<tr>'
-        + '<td class="text-center text-muted" style="font-size:.78rem;">' + (i+1) + '</td>'
+        + '<td class="text-center text-muted" style="font-size:.7rem;">' + (i+1) + '</td>'
         + '<td><strong>' + UtilityService.escapeHtml(p.name) + '</strong></td>'
-        + '<td class="text-muted" style="font-size:.78rem;">' + (p.nik ? UtilityService.escapeHtml(p.nik) : '—') + '</td>'
+        + '<td class="text-muted" style="font-size:.7rem;">' + (p.nik ? UtilityService.escapeHtml(p.nik) : '—') + '</td>'
         + '<td>' + (p.birth_date ? this._fmtDate(p.birth_date) : '—') + '</td>'
-        + '<td><span class="badge bg-info text-dark">' + this._calcAge(p.birth_date) + '</span></td>'
+        + '<td><span class="badge bg-warning text-dark">' + this._calcAge(p.birth_date) + '</span></td>'
         + '<td>' + UtilityService.escapeHtml(p.position || '-') + '</td>'
         + '<td>' + projBadge + '</td>'
         + '<td class="text-center">'

@@ -1,9 +1,9 @@
-// pembelian.js — Procurement (async Google Sheets) - Optimized with Event Delegation
+// pembelian.js — Procurement (async Google Sheets) - Inline Add with Action Buttons
+
 const ProcurementPage = {
-  _currentItems: [],
   _cachedProjects: [],
-  _editId: null,
   _listClickHandler: null,
+  _inlineChangeHandler: null,
 
   render() {
     return `
@@ -19,29 +19,61 @@ const ProcurementPage = {
             <option value="">Semua Toko/Supplier</option>
           </select>
         </div>
-        <button class="btn btn--primary" onclick="ProcurementPage.showPOForm()"><i class="bi bi-plus-lg"></i> Item Baru</button>
+        <!-- ACTION BUTTONS -->
+        <div class="d-flex gap-2">
+          <button class="btn btn--primary" onclick="ProcurementPage.addEmptyRow()" id="btnAddItem">
+            <i class="bi bi-plus-lg"></i> Tambah Item
+          </button>
+          <button class="btn btn--success" onclick="ProcurementPage.saveAllItems()" id="btnSaveAll" style="display:none;">
+            <i class="bi bi-save"></i> Simpan Data
+          </button>
+          <button class="btn btn--outline-info" onclick="ProcurementPage.loadPOList()" id="btnRefresh">
+            <i class="bi bi-arrow-clockwise"></i> Refresh
+          </button>
+        </div>
       </div>
     <div id="procurementListView">
-      <div class="card d-none d-md-block"><div class="card-body p-0"><div class="table-responsive">
-        <table class="table table--hover mb-0">
-          <thead><tr><th>No</th><th>Proyek</th><th>Nama Material</th><th>Spesifikasi</th><th>Toko/Supplier</th><th>Qty</th><th>Unit</th><th>Harga Satuan</th><th>Total</th><th>Aksi</th></tr></thead>
-          <tbody id="poTableBody"><tr><td colspan="10" class="text-center py-4">Memuat data...</td></tr></tbody>
-        </table>
-      </div></div></div>
-      <div id="poCardList" class="d-md-none"></div>
-    </div>
-
-    <div id="procurementFormView" style="display:none;">
-      <div class="page-header no-print">
-        <h2 class="page-title"><span class="page-title__icon"><i class="bi bi-cart"></i></span><span id="poPageTitle">Item Pembelian Baru</span></h2>
-        <button class="btn btn--outline-secondary" onclick="ProcurementPage.showPOList()"><i class="bi bi-x-lg"></i> Batal</button>
+      <!-- Tabel akan dirender oleh loadPOList() setelah proyek dipilih -->
+      <div id="poTableContainer">
+        <div class="card">
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table--hover mb-0" id="poMainTable">
+                <thead>
+                  <tr>
+                    <th class="col-width-40">No</th>
+                    <th>Tanggal</th>
+                    <th>Toko/Supplier</th>
+                    <th>Nama Material</th>
+                    <th>Spesifikasi</th>
+                    <th class="col-width-80">Qty</th>
+                    <th class="col-width-80">Unit</th>
+                    <th class="col-width-130">Harga Satuan</th>
+                    <th class="col-width-130">Total</th>
+                    <th class="col-width-80">Aksi</th>
+                  </tr>
+                </thead>
+                <tbody id="poTableBody">
+                  <tr><td colspan="10" class="text-center py-4 text-muted">Pilih proyek untuk melihat dan menambahkan item pembelian</td></tr>
+                </tbody>
+                <tfoot id="poTableFoot" style="display:none;">
+                  <tr class="fw-bold" style="background:#f0f9ff;">
+                    <td colspan="8" class="text-end">TOTAL KESELURUHAN:</td>
+                    <td class="text-end" id="poGrandTotalCell">Rp 0</td>
+                    <td></td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="wizard">
-        <div class="wizard__header"><div class="wizard__title"><i class="bi bi-cart"></i> Form Item Pembelian</div></div>
-        <div class="wizard__body"><div id="poStepContent" class="step-content"></div></div>
-        <div class="wizard__footer">
-          <button class="btn btn--outline-secondary" onclick="ProcurementPage.showPOList()"><i class="bi bi-x-lg"></i> Batal</button>
-          <div class="ms-auto"><button class="btn btn--success" onclick="ProcurementPage.finishAllItems()"><i class="bi bi-check-lg"></i> Simpan Semua</button></div>
+      
+      <!-- Status bar untuk item yang belum disimpan -->
+      <div id="poStatusBar" class="mt-2" style="display:none;">
+        <div class="flow-alert flow-alert--warning">
+          <i class="bi bi-exclamation-triangle-fill"></i>
+          <span id="poStatusText">Ada perubahan yang belum disimpan.</span>
         </div>
       </div>
     </div>`;
@@ -52,14 +84,19 @@ const ProcurementPage = {
     const sel = document.getElementById('selectFilterPOProject');
     if (sel) {
       sel.innerHTML = '<option value="">Semua Proyek</option>';
-      this._cachedProjects.forEach(p => { const o=document.createElement('option'); o.value=p.id; o.textContent=p.name; sel.appendChild(o); });
+      this._cachedProjects.forEach(p => {
+        const o = document.createElement('option');
+        o.value = p.id;
+        o.textContent = p.name;
+        sel.appendChild(o);
+      });
     }
     this._attachDelegatedListeners();
-    await this.loadPOList();
+    // Tidak auto-load, tunggu user pilih proyek
   },
 
   // ============================================================
-  // EVENT DELEGATION — Pasang listener SEKALI pada parent statis
+  // EVENT DELEGATION
   // ============================================================
   _attachDelegatedListeners() {
     const listView = document.getElementById('procurementListView');
@@ -71,272 +108,538 @@ const ProcurementPage = {
         const btn = e.target.closest('[data-action]');
         if (!btn) return;
         const { action, id } = btn.dataset;
-        if (action === 'edit') await ProcurementPage.editPO(id);
+        if (action === 'save-inline') await ProcurementPage.saveInlineRow(id);
+        if (action === 'edit') await ProcurementPage.editInlineRow(id);
         if (action === 'delete') await ProcurementPage.deletePOConfirm(id);
+        if (action === 'cancel-edit') ProcurementPage.cancelEditRow(id);
+        if (action === 'add-inline') ProcurementPage.addEmptyRow();
       };
       listView.addEventListener('click', this._listClickHandler);
-    }
-  },
 
-  showPOList() {
-    this._editId = null;
-    document.getElementById('procurementListView').style.display = 'block';
-    document.getElementById('procurementFormView').style.display = 'none';
-    this.loadPOList();
-  },
-
-  async showPOForm(editData = null) {
-    const hasP = await DataAccess.hasProjects();
-    if (!hasP) { UIService.showToast('Buat proyek terlebih dahulu!','warning'); UIService.navigate('proyek'); return; }
-    this._cachedProjects = await DataAccess.getAllProjects();
-    document.getElementById('procurementListView').style.display = 'none';
-    document.getElementById('procurementFormView').style.display = 'block';
-    this._currentItems = [];
-    this._editId = null;
-    if (editData) {
-      document.getElementById('poPageTitle').textContent = 'Edit Item Pembelian';
-      this._editId = editData.id;
-      this._currentItems = [{ id:editData.id, material_name:editData.material_name||'', specification:editData.specification||'', quantity:editData.quantity||1, unit:editData.unit||'', unit_price:editData.unit_price||0, total_price:editData.total_price||0, supplier:editData.supplier||'', created_at:editData.created_at }];
-    } else {
-      document.getElementById('poPageTitle').textContent = 'Item Pembelian Baru';
-    }
-    this.renderPOForm(editData);
-  },
-
-  renderPOForm(editData = null) {
-    const projOpts = this._cachedProjects.map(p=>`<option value="${p.id}" ${editData&&editData.project_id===p.id?'selected':''}>${UtilityService.escapeHtml(p.name)}</option>`).join('');
-    document.getElementById('poStepContent').innerHTML = `
-      <div class="section-title">Informasi Proyek</div>
-      <div class="row g-3 mb-4">
-        <div class="col-sm-4"><label class="form-label">Proyek <span class="text-danger">*</span></label>
-          <select class="form-select" id="selectPOProject"><option value="">-- Pilih Proyek --</option>${projOpts}</select>
-        </div>
-        <div class="col-sm-4"><label class="form-label">Tanggal Pembelian</label>
-          <input type="date" class="form-control" id="inputPODate" value="${editData ? UtilityService.toDateInput(editData.date) : new Date().toISOString().split('T')[0]}">
-        </div>
-        <div class="col-sm-4"><label class="form-label">Toko / Supplier</label>
-          <input type="text" class="form-control" id="inputPOSupplier" value="${UtilityService.escapeHtml(editData?.supplier || '')}" placeholder="Nama toko atau supplier">
-        </div>
-      </div>
-      <div class="section-title">Daftar Item Pembelian</div>
-      <div class="d-flex justify-content-between mb-3">
-        <p class="text-muted mb-0">Tambahkan item pembelian</p>
-        <button class="btn btn--primary" onclick="ProcurementPage.addItemRow()"><i class="bi bi-plus-lg"></i> Tambah Item</button>
-      </div>
-      <div class="table-responsive">
-        <table class="hiradc-table" id="poItemsTable">
-          <thead><tr><th class="col-width-40">No</th><th>Nama Material <span class="text-danger">*</span></th><th>Spesifikasi</th><th class="col-width-80">Qty</th><th class="col-width-80">Unit</th><th class="col-width-130">Harga Satuan</th><th class="col-width-130">Total</th><th class="col-width-40"></th></tr></thead>
-          <tbody id="poItemsTableBody"></tbody>
-        </table>
-      </div>
-      <div class="mt-3 p-3 bg-surface rounded">
-        <div class="d-flex justify-content-end align-items-center gap-3">
-          <span class="text-muted" style="font-size:var(--font-size-sm);">Total Pembelian:</span>
-          <strong style="font-size:var(--font-size-lg);color:var(--color-success);" id="poGrandTotal">Rp 0</strong>
-        </div>
-      </div>`;
-
-    if (editData && editData.project_id) setTimeout(()=>{ const s=document.getElementById('selectPOProject'); if(s) s.value=editData.project_id; }, 50);
-    if (this._currentItems.length > 0) this._currentItems.forEach(item => this.addItemRow(item));
-    else this.addItemRow();
-    this.calculateGrandTotal();
-  },
-
-  addItemRow(itemData = {}) {
-    const tbody = document.getElementById('poItemsTableBody'); if(!tbody) return;
-    const idx = tbody.querySelectorAll('tr').length;
-    const row = document.createElement('tr'); row.setAttribute('data-item-index', idx);
-    row.innerHTML = `<td class="text-center fw-semibold">${idx+1}</td>
-      <td><input type="text" class="po-item-name" value="${UtilityService.escapeHtml(itemData.material_name||'')}" placeholder="Nama material" oninput="ProcurementPage.calculateItemTotal(this)"></td>
-      <td><input type="text" class="po-item-spec" value="${UtilityService.escapeHtml(itemData.specification||'')}" placeholder="Spesifikasi"></td>
-      <td><input type="number" class="po-item-qty" value="${itemData.quantity||1}" min="0" step="any" oninput="ProcurementPage.calculateItemTotal(this)"></td>
-      <td><input type="text" class="po-item-unit" value="${UtilityService.escapeHtml(itemData.unit||'')}" placeholder="pcs"></td>
-      <td><input type="number" class="po-item-price" value="${itemData.unit_price||0}" min="0" oninput="ProcurementPage.calculateItemTotal(this)"></td>
-      <td><input type="text" class="po-item-total input-readonly-bg" value="${UtilityService.formatCurrency(itemData.total_price||0)}" readonly style="font-weight:700;"></td>
-      <td class="text-center"><button class="btn btn--xs btn--outline-danger" onclick="ProcurementPage.removeItemRow(this)"><i class="bi bi-trash"></i></button></td>`;
-    tbody.appendChild(row);
-    this.calculateItemTotal(row.querySelector('.po-item-name'));
-  },
-
-  removeItemRow(btn) {
-    const row=btn.closest('tr'); if(!row) return;
-    const tbody=document.getElementById('poItemsTableBody');
-    row.remove(); this.updateRowNumbers();
-    if(tbody.querySelectorAll('tr').length===0) this.addItemRow();
-    this.calculateGrandTotal();
-  },
-
-  updateRowNumbers() {
-    const tbody=document.getElementById('poItemsTableBody'); if(!tbody) return;
-    tbody.querySelectorAll('tr').forEach((row,i)=>{ row.setAttribute('data-item-index',i); const fc=row.querySelector('td:first-child'); if(fc) fc.textContent=i+1; });
-  },
-
-  calculateItemTotal(el) {
-    const row=el.closest('tr'); if(!row) return;
-    const qty=parseFloat(row.querySelector('.po-item-qty')?.value||0), price=parseFloat(row.querySelector('.po-item-price')?.value||0);
-    const ti=row.querySelector('.po-item-total'); if(ti) ti.value=UtilityService.formatCurrency(qty*price);
-    this.calculateGrandTotal();
-  },
-
-  calculateGrandTotal() {
-    const tbody=document.getElementById('poItemsTableBody'); if(!tbody) return;
-    let total=0; tbody.querySelectorAll('tr').forEach(row=>{ total+=parseFloat(row.querySelector('.po-item-qty')?.value||0)*parseFloat(row.querySelector('.po-item-price')?.value||0); });
-    const el=document.getElementById('poGrandTotal'); if(el) el.textContent=UtilityService.formatCurrency(total);
-  },
-
-  collectItems() {
-    const items=[]; const tbody=document.getElementById('poItemsTableBody'); if(!tbody) return items;
-    tbody.querySelectorAll('tr').forEach(row=>{
-      const name=(row.querySelector('.po-item-name')?.value||'').trim(); if(!name) return;
-      const qty=parseFloat(row.querySelector('.po-item-qty')?.value||0), price=parseFloat(row.querySelector('.po-item-price')?.value||0);
-      items.push({ material_name:name, specification:(row.querySelector('.po-item-spec')?.value||'').trim(), quantity:qty, unit:(row.querySelector('.po-item-unit')?.value||'').trim(), unit_price:price, total_price:qty*price });
-    });
-    return items;
-  },
-
-  async finishAllItems() {
-    const projectId = document.getElementById('selectPOProject')?.value;
-    if (!projectId) { UIService.showToast('Pilih proyek terlebih dahulu!', TOAST.WARNING); return; }
-    const items = this.collectItems().filter(i => i.material_name);
-    if (!items.length) { UIService.showToast('Minimal 1 item dengan nama material!', TOAST.WARNING); return; }
-    for (const item of items) {
-      if (item.quantity <= 0) { UIService.showToast(`"${item.material_name}": Qty harus > 0!`, TOAST.WARNING); return; }
-    }
-    const poDate = document.getElementById('inputPODate')?.value || new Date().toISOString().split('T')[0];
-    const poSupplier = (document.getElementById('inputPOSupplier')?.value || '').trim();
-    const now = new Date().toISOString();
-    const isEdit = !!this._editId;
-
-    try {
-      if (isEdit) {
-        await DataAccess.deletePO(this._editId);
-        const item = items[0];
-        const updated = {
-          id: this._editId,
-          project_id: projectId,
-          material_name: item.material_name,
-          specification: item.specification,
-          quantity: item.quantity,
-          unit: item.unit,
-          unit_price: item.unit_price,
-          total_price: item.total_price,
-          supplier: poSupplier,
-          date: poDate,
-          created_at: this._currentItems[0]?.created_at || now,
-          updated_at: now
-        };
-        await DataAccess.savePO(updated);
-        UIService.showToast('Item berhasil diperbarui!', TOAST.SUCCESS);
-      } else {
-        const poArray = items.map((item, idx) => ({
-          id: 'po_' + Date.now() + '_' + idx + '_' + Math.random().toString(36).substr(2, 6),
-          project_id: projectId,
-          material_name: item.material_name,
-          specification: item.specification,
-          quantity: item.quantity,
-          unit: item.unit,
-          unit_price: item.unit_price,
-          total_price: item.total_price,
-          supplier: poSupplier,
-          date: poDate,
-          created_at: now
-        }));
-        await DataAccess.saveMultiplePO(poArray);
-        UIService.showToast(`${items.length} item berhasil disimpan!`, TOAST.SUCCESS);
+      // Handle input changes for calculations
+      if (this._inlineChangeHandler) {
+        listView.removeEventListener('input', this._inlineChangeHandler);
       }
-      this._editId = null;
-      setTimeout(() => this.showPOList(), 1200);
-    } catch (err) { AppError.handle(err, 'Menyimpan item pembelian'); }
+      this._inlineChangeHandler = (e) => {
+        if (e.target.classList.contains('po-inline-qty') || e.target.classList.contains('po-inline-price')) {
+          ProcurementPage.calculateInlineTotal(e.target);
+        }
+      };
+      listView.addEventListener('input', this._inlineChangeHandler);
+    }
   },
 
+  // ============================================================
+  // LOAD & RENDER TABLE
+  // ============================================================
   async loadPOList() {
+    const projectId = document.getElementById('selectFilterPOProject')?.value || '';
+    const supplierFilter = document.getElementById('selectFilterPOSupplier')?.value || '';
+
+    if (!projectId) {
+      document.getElementById('poTableBody').innerHTML = '<tr><td colspan="10" class="text-center py-4 text-muted">Pilih proyek untuk melihat dan menambahkan item pembelian</td></tr>';
+      document.getElementById('poTableFoot').style.display = 'none';
+      document.getElementById('btnSaveAll').style.display = 'none';
+      document.getElementById('btnAddItem').style.display = '';
+      this._hideStatusBar();
+      return;
+    }
+
+    // Tampilkan tombol aksi
+    document.getElementById('btnAddItem').style.display = '';
+    document.getElementById('btnSaveAll').style.display = 'none';
+    this._hideStatusBar();
+
     try {
-      const [poList, projects] = await Promise.all([DataAccess.getAllPO(), DataAccess.getAllProjects()]);
-      const projId = document.getElementById('selectFilterPOProject')?.value || '';
-      const supplierFilter = document.getElementById('selectFilterPOSupplier')?.value || '';
-      let list = [...poList];
-      if (projId) list = list.filter(po => po.project_id === projId);
+      const [poList] = await Promise.all([DataAccess.getAllPO()]);
+      let list = poList.filter(po => po.project_id === projectId);
       if (supplierFilter) list = list.filter(po => (po.supplier || '') === supplierFilter);
       list.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
+      // Update supplier filter dropdown
       const supplierSel = document.getElementById('selectFilterPOSupplier');
       if (supplierSel) {
         const currentSupplierVal = supplierSel.value;
-        const uniqueSuppliers = [...new Set(poList.map(po => po.supplier || '').filter(Boolean))].sort();
+        const projectPOs = poList.filter(po => po.project_id === projectId);
+        const uniqueSuppliers = [...new Set(projectPOs.map(po => po.supplier || '').filter(Boolean))].sort();
         supplierSel.innerHTML = '<option value="">Semua Toko/Supplier</option>' + uniqueSuppliers.map(s => `<option value="${UtilityService.escapeHtml(s)}">${UtilityService.escapeHtml(s)}</option>`).join('');
         supplierSel.value = currentSupplierVal;
       }
 
-      const tableBody = document.getElementById('poTableBody');
-      const cardList  = document.getElementById('poCardList');
-
-      if (!list.length) {
-        if (tableBody) tableBody.innerHTML = '<tr><td colspan="10" class="text-center py-5">Tidak ada item pembelian</td></tr>';
-        if (cardList)  cardList.innerHTML  = '<div class="empty-state"><div class="empty-state__icon"><i class="bi bi-cart-x"></i></div><p>Tidak ada item pembelian</p></div>';
-      } else {
-        if (tableBody) {
-          tableBody.innerHTML = list.map((po, i) => {
-            const p = projects.find(x => x.id === po.project_id);
-            return `<tr>
-              <td class="text-center">${i+1}</td>
-              <td>${UtilityService.escapeHtml(p?.name || '-')}</td>
-              <td><strong>${UtilityService.escapeHtml(po.material_name || '-')}</strong></td>
-              <td>${UtilityService.escapeHtml(po.specification || '-')}</td>
-              <td>${UtilityService.escapeHtml(po.supplier || '-')}</td>
-              <td class="text-center">${po.quantity || 0}</td>
-              <td class="text-center">${UtilityService.escapeHtml(po.unit || '-')}</td>
-              <td class="text-end">${UtilityService.formatCurrency(po.unit_price)}</td>
-              <td class="text-end"><strong>${UtilityService.formatCurrency(po.total_price)}</strong></td>
-              <td class="text-center">
-                <button class="btn btn--xs btn--outline-warning me-1" data-action="edit"   data-id="${po.id}"><i class="bi bi-pencil"></i></button>
-                <button class="btn btn--xs btn--outline-danger"       data-action="delete" data-id="${po.id}"><i class="bi bi-trash"></i></button>
-              </td>
-            </tr>`;
-          }).join('');
-          // TIDAK perlu cloneNode lagi — listener sudah terpasang di parent
-        }
-        if (cardList) {
-          cardList.innerHTML = list.map(po => {
-            const p = projects.find(x => x.id === po.project_id);
-            return `<div class="card"><div class="card-body py-3">
-              <div class="fw-bold">${UtilityService.escapeHtml(po.material_name || '-')}</div>
-              <div style="font-size:.7rem;">${UtilityService.escapeHtml(p?.name || '-')} | ${UtilityService.escapeHtml(po.specification || '-')}</div>
-              ${po.supplier ? `<div style="font-size:.7rem;"><i class="bi bi-shop"></i> ${UtilityService.escapeHtml(po.supplier)}</div>` : ''}
-              <div style="font-size:.7rem;">${po.quantity || 0} ${UtilityService.escapeHtml(po.unit || '')} | ${UtilityService.formatCurrency(po.unit_price)}</div>
-              <div class="fw-semibold text-success">${UtilityService.formatCurrency(po.total_price)}</div>
-              <div class="d-flex gap-2 mt-2">
-                <button class="btn btn--xs btn--outline-warning" data-action="edit"   data-id="${po.id}">Edit</button>
-                <button class="btn btn--xs btn--outline-danger"  data-action="delete" data-id="${po.id}">Hapus</button>
-              </div>
-            </div></div>`;
-          }).join('');
-          // TIDAK perlu cloneNode lagi — listener sudah terpasang di parent
-        }
-      }
+      this._renderTable(list, projectId);
     } catch (err) {
       AppError.handle(err, 'Memuat daftar pembelian');
     }
   },
 
-  async editPO(id) {
-    try {
-      const po = await DataAccess.getPOById(id);
-      if (po) {
-        this._currentItems = [{ id: po.id, material_name: po.material_name || '', specification: po.specification || '', quantity: po.quantity || 1, unit: po.unit || '', unit_price: po.unit_price || 0, total_price: po.total_price || 0, supplier: po.supplier || '', created_at: po.created_at }];
-        this.showPOForm(po);
-      }
-    } catch (err) { AppError.handle(err, 'Membuka item pembelian'); }
+  _renderTable(existingItems, projectId) {
+    const tbody = document.getElementById('poTableBody');
+    const tfoot = document.getElementById('poTableFoot');
+    if (!tbody) return;
+
+    let html = '';
+
+    // Baris form penambahan item di PALING ATAS
+    html += this._renderInlineAddRow(projectId);
+
+    // Baris data existing
+    if (existingItems.length === 0) {
+      html += '<tr id="noDataRow"><td colspan="10" class="text-center py-3 text-muted">Belum ada item. Gunakan baris di atas untuk menambahkan.</td></tr>';
+    } else {
+      existingItems.forEach((po, i) => {
+        html += this._renderDataRow(po, i + 1);
+      });
+    }
+
+    tbody.innerHTML = html;
+    tfoot.style.display = 'table-footer-group';
+    this._updateGrandTotal();
   },
 
+  _renderDataRow(po, index) {
+    const dateValue = UtilityService.toDateInput(po.date) || '';
+    return `<tr id="row-${po.id}" data-item-id="${po.id}">
+      <td class="text-center text-muted">${index}</td>
+      <td class="editable-field">
+        <span class="display-value">${UtilityService.formatDate(po.date)}</span>
+        <input type="date" class="form-control form-control-sm edit-value po-inline-date" value="${dateValue}" style="display:none;min-width:120px;">
+      </td>
+      <td class="editable-field">
+        <span class="display-value">${UtilityService.escapeHtml(po.supplier || '-')}</span>
+        <input type="text" class="form-control form-control-sm edit-value po-inline-supplier" value="${UtilityService.escapeHtml(po.supplier || '')}" style="display:none;" placeholder="Toko/Supplier">
+      </td>
+      <td class="editable-field">
+        <span class="display-value"><strong>${UtilityService.escapeHtml(po.material_name || '-')}</strong></span>
+        <input type="text" class="form-control form-control-sm edit-value po-inline-name" value="${UtilityService.escapeHtml(po.material_name || '')}" style="display:none;" placeholder="Nama material">
+      </td>
+      <td class="editable-field">
+        <span class="display-value">${UtilityService.escapeHtml(po.specification || '-')}</span>
+        <input type="text" class="form-control form-control-sm edit-value po-inline-spec" value="${UtilityService.escapeHtml(po.specification || '')}" style="display:none;" placeholder="Spesifikasi">
+      </td>
+      <td class="editable-field text-center">
+        <span class="display-value">${po.quantity || 0}</span>
+        <input type="number" class="form-control form-control-sm edit-value po-inline-qty" value="${po.quantity || 0}" min="0" step="any" style="display:none;width:70px;margin:0 auto;">
+      </td>
+      <td class="editable-field text-center">
+        <span class="display-value">${UtilityService.escapeHtml(po.unit || '-')}</span>
+        <input type="text" class="form-control form-control-sm edit-value po-inline-unit" value="${UtilityService.escapeHtml(po.unit || '')}" style="display:none;width:70px;margin:0 auto;" placeholder="pcs">
+      </td>
+      <td class="editable-field text-end">
+        <span class="display-value">${UtilityService.formatCurrency(po.unit_price)}</span>
+        <input type="number" class="form-control form-control-sm edit-value po-inline-price" value="${po.unit_price || 0}" min="0" style="display:none;width:120px;">
+      </td>
+      <td class="text-end">
+        <strong class="row-total">${UtilityService.formatCurrency(po.total_price)}</strong>
+      </td>
+      <td class="text-center">
+        <button class="btn btn--xs btn--outline-warning me-1 edit-btn" data-action="edit" data-id="${po.id}" title="Edit item">
+          <i class="bi bi-pencil"></i>
+        </button>
+        <button class="btn btn--xs btn--outline-danger delete-btn" data-action="delete" data-id="${po.id}" title="Hapus item">
+          <i class="bi bi-trash"></i>
+        </button>
+        <button class="btn btn--xs btn--success save-btn" data-action="save-inline" data-id="${po.id}" style="display:none;" title="Simpan perubahan">
+          <i class="bi bi-check-lg"></i>
+        </button>
+        <button class="btn btn--xs btn--outline-secondary cancel-btn" data-action="cancel-edit" data-id="${po.id}" style="display:none;" title="Batal edit">
+          <i class="bi bi-x-lg"></i>
+        </button>
+      </td>
+    </tr>`;
+  },
+
+  _renderInlineAddRow(projectId) {
+    const today = new Date().toISOString().split('T')[0];
+    // Baris ini akan selalu menjadi baris pertama dalam tabel
+    return `<tr id="inlineAddRow" class="table-active" data-new-item="true">
+      <td class="text-center text-muted fw-bold"><i class="bi bi-plus-circle text-primary"></i></td>
+      <td>
+        <input type="date" class="form-control form-control-sm po-inline-date" value="${today}" style="min-width:100px;">
+      </td>
+      <td>
+        <input type="text" class="form-control form-control-sm po-inline-supplier" placeholder="Toko/Supplier">
+      </td>
+      <td>
+        <input type="text" class="form-control form-control-sm po-inline-name" placeholder="Nama material *" id="inlineMaterialName">
+      </td>
+      <td>
+        <input type="text" class="form-control form-control-sm po-inline-spec" placeholder="Spesifikasi">
+      </td>
+      <td class="text-center">
+        <input type="number" class="form-control form-control-sm po-inline-qty" value="1" min="0" step="any" style="width:70px;margin:0 auto;">
+      </td>
+      <td class="text-center">
+        <input type="text" class="form-control form-control-sm po-inline-unit" placeholder="pcs" style="width:70px;margin:0 auto;">
+      </td>
+      <td class="text-end">
+        <input type="number" class="form-control form-control-sm po-inline-price" value="0" min="0" style="width:120px;">
+      </td>
+      <td class="text-end">
+        <strong class="row-total">Rp 0</strong>
+      </td>
+      <td class="text-center">
+        <button class="btn btn--xs btn--primary" data-action="add-inline" title="Tambah Item ke Daftar">
+          <i class="bi bi-plus-lg"></i> Add
+        </button>
+      </td>
+    </tr>`;
+  },
+
+  // ============================================================
+  // INLINE ADD
+  // ============================================================
+  async addEmptyRow() {
+    const row = document.getElementById('inlineAddRow');
+    if (!row) return;
+
+    const projectId = document.getElementById('selectFilterPOProject')?.value;
+    if (!projectId) {
+      UIService.showToast('Pilih proyek terlebih dahulu!', 'warning');
+      return;
+    }
+
+    const materialName = row.querySelector('.po-inline-name')?.value?.trim();
+    if (!materialName) {
+      UIService.showToast('Nama material wajib diisi!', 'warning');
+      const inputName = row.querySelector('.po-inline-name');
+      if (inputName) inputName.focus();
+      return;
+    }
+
+    const dateVal = row.querySelector('.po-inline-date')?.value || new Date().toISOString().split('T')[0];
+    const supplier = row.querySelector('.po-inline-supplier')?.value?.trim() || '';
+    const specification = row.querySelector('.po-inline-spec')?.value?.trim() || '';
+    const quantity = parseFloat(row.querySelector('.po-inline-qty')?.value) || 0;
+    const unit = row.querySelector('.po-inline-unit')?.value?.trim() || '';
+    const unitPrice = parseFloat(row.querySelector('.po-inline-price')?.value) || 0;
+
+    if (quantity <= 0) {
+      UIService.showToast('Qty harus lebih dari 0!', 'warning');
+      const qtyInput = row.querySelector('.po-inline-qty');
+      if (qtyInput) qtyInput.focus();
+      return;
+    }
+
+    const totalPrice = quantity * unitPrice;
+    const now = new Date().toISOString();
+    const newId = 'po_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+
+    const newPO = {
+      id: newId,
+      project_id: projectId,
+      material_name: materialName,
+      specification,
+      quantity,
+      unit,
+      unit_price: unitPrice,
+      total_price: totalPrice,
+      supplier,
+      date: dateVal,
+      created_at: now
+    };
+
+    try {
+      await DataAccess.savePO(newPO);
+      UIService.showToast('Item berhasil ditambahkan!', 'success');
+      // Reset inline form fields
+      row.querySelector('.po-inline-name').value = '';
+      row.querySelector('.po-inline-spec').value = '';
+      row.querySelector('.po-inline-qty').value = '1';
+      row.querySelector('.po-inline-unit').value = '';
+      row.querySelector('.po-inline-price').value = '0';
+      row.querySelector('.po-inline-supplier').value = '';
+      row.querySelector('.row-total').textContent = 'Rp 0';
+      // Reload untuk menampilkan data terbaru
+      await this.loadPOList();
+    } catch (err) {
+      AppError.handle(err, 'Menambahkan item pembelian');
+    }
+  },
+
+  // ============================================================
+  // SAVE ALL ITEMS (Batch Save)
+  // ============================================================
+  async saveAllItems() {
+    const projectId = document.getElementById('selectFilterPOProject')?.value;
+    if (!projectId) {
+      UIService.showToast('Pilih proyek terlebih dahulu!', 'warning');
+      return;
+    }
+
+    // Kumpulkan semua item yang sedang dalam mode edit
+    const editedItems = [];
+    const rows = document.querySelectorAll('#poTableBody tr[data-item-id]');
+    
+    for (const row of rows) {
+      const itemId = row.getAttribute('data-item-id');
+      const isEditing = row.querySelector('.save-btn')?.style.display !== 'none';
+      
+      if (isEditing) {
+        const materialName = row.querySelector('.po-inline-name')?.value?.trim();
+        if (!materialName) {
+          UIService.showToast(`Nama material untuk item ${itemId} wajib diisi!`, 'warning');
+          return;
+        }
+
+        const dateVal = row.querySelector('.po-inline-date')?.value || new Date().toISOString().split('T')[0];
+        const supplier = row.querySelector('.po-inline-supplier')?.value?.trim() || '';
+        const specification = row.querySelector('.po-inline-spec')?.value?.trim() || '';
+        const quantity = parseFloat(row.querySelector('.po-inline-qty')?.value) || 0;
+        const unit = row.querySelector('.po-inline-unit')?.value?.trim() || '';
+        const unitPrice = parseFloat(row.querySelector('.po-inline-price')?.value) || 0;
+        const totalPrice = quantity * unitPrice;
+
+        if (quantity <= 0) {
+          UIService.showToast(`Qty untuk item ${materialName} harus lebih dari 0!`, 'warning');
+          return;
+        }
+
+        editedItems.push({
+          id: itemId,
+          project_id: projectId,
+          material_name: materialName,
+          specification,
+          quantity,
+          unit,
+          unit_price: unitPrice,
+          total_price: totalPrice,
+          supplier,
+          date: dateVal,
+          updated_at: new Date().toISOString()
+        });
+      }
+    }
+
+    if (editedItems.length === 0) {
+      UIService.showToast('Tidak ada perubahan yang perlu disimpan.', 'info');
+      return;
+    }
+
+    // Konfirmasi sebelum menyimpan
+    UtilityService.showConfirmDialog(
+      `Simpan ${editedItems.length} item yang telah diubah?`,
+      async () => {
+        const saveBtn = document.getElementById('btnSaveAll');
+        if (saveBtn) {
+          saveBtn.disabled = true;
+          saveBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> Menyimpan...';
+        }
+
+        try {
+          // Gunakan batch save untuk performa lebih baik
+          await DataAccess.saveMultiplePO(editedItems);
+          UIService.showToast(`${editedItems.length} item berhasil disimpan!`, 'success');
+          await this.loadPOList();
+          this._hideStatusBar();
+        } catch (err) {
+          AppError.handle(err, 'Menyimpan item pembelian');
+          // Fallback: simpan satu per satu
+          try {
+            let savedCount = 0;
+            for (const item of editedItems) {
+              try {
+                await DataAccess.savePO(item);
+                savedCount++;
+              } catch (singleErr) {
+                console.error('[ProcurementPage] Gagal simpan item:', item.id, singleErr);
+              }
+            }
+            if (savedCount > 0) {
+              UIService.showToast(`${savedCount}/${editedItems.length} item berhasil disimpan!`, 'success');
+              await this.loadPOList();
+            }
+          } catch (fallbackErr) {
+            AppError.handle(fallbackErr, 'Menyimpan item (fallback)');
+          }
+        } finally {
+          if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = '<i class="bi bi-save"></i> Simpan Data';
+          }
+        }
+      }
+    );
+  },
+
+  // ============================================================
+  // INLINE EDIT
+  // ============================================================
+  editInlineRow(id) {
+    const row = document.getElementById(`row-${id}`);
+    if (!row) return;
+
+    // Sembunyikan display values, tampilkan input
+    row.querySelectorAll('.display-value').forEach(el => el.style.display = 'none');
+    row.querySelectorAll('.edit-value').forEach(el => el.style.display = '');
+
+    // Toggle buttons
+    row.querySelector('.edit-btn').style.display = 'none';
+    row.querySelector('.delete-btn').style.display = 'none';
+    row.querySelector('.save-btn').style.display = '';
+    row.querySelector('.cancel-btn').style.display = '';
+
+    // Highlight row yang sedang diedit
+    row.style.background = '#fffbeb';
+    row.style.borderLeft = '3px solid var(--color-warning)';
+
+    // Tampilkan tombol Simpan Data dan status bar
+    this._showSaveButton();
+    this._showStatusBar('Ada item yang sedang diedit. Klik "Simpan Data" untuk menyimpan semua perubahan.');
+  },
+
+  cancelEditRow(id) {
+    // Reload list untuk mengembalikan ke tampilan normal
+    this.loadPOList();
+    this._checkPendingEdits();
+  },
+
+  async saveInlineRow(id) {
+    const row = document.getElementById(`row-${id}`);
+    if (!row) return;
+
+    const projectId = document.getElementById('selectFilterPOProject')?.value;
+    const materialName = row.querySelector('.po-inline-name')?.value?.trim();
+    if (!materialName) {
+      UIService.showToast('Nama material wajib diisi!', 'warning');
+      return;
+    }
+
+    const dateVal = row.querySelector('.po-inline-date')?.value || new Date().toISOString().split('T')[0];
+    const supplier = row.querySelector('.po-inline-supplier')?.value?.trim() || '';
+    const specification = row.querySelector('.po-inline-spec')?.value?.trim() || '';
+    const quantity = parseFloat(row.querySelector('.po-inline-qty')?.value) || 0;
+    const unit = row.querySelector('.po-inline-unit')?.value?.trim() || '';
+    const unitPrice = parseFloat(row.querySelector('.po-inline-price')?.value) || 0;
+    const totalPrice = quantity * unitPrice;
+
+    const updatedPO = {
+      id,
+      project_id: projectId,
+      material_name: materialName,
+      specification,
+      quantity,
+      unit,
+      unit_price: unitPrice,
+      total_price: totalPrice,
+      supplier,
+      date: dateVal,
+      updated_at: new Date().toISOString()
+    };
+
+    try {
+      await DataAccess.savePO(updatedPO);
+      UIService.showToast('Item berhasil diperbarui!', 'success');
+      await this.loadPOList();
+      this._checkPendingEdits();
+    } catch (err) {
+      AppError.handle(err, 'Memperbarui item pembelian');
+    }
+  },
+
+  // ============================================================
+  // DELETE
+  // ============================================================
   async deletePOConfirm(id) {
     UtilityService.showConfirmDialog('Hapus item ini?', async () => {
       try {
         await DataAccess.deletePO(id);
         await this.loadPOList();
-        UIService.showToast('Item dihapus.', TOAST.WARNING);
+        UIService.showToast('Item dihapus.', 'warning');
       } catch (err) { AppError.handle(err, 'Menghapus item pembelian'); }
     });
+  },
+
+  // ============================================================
+  // CALCULATIONS
+  // ============================================================
+  calculateInlineTotal(inputEl) {
+    const row = inputEl.closest('tr');
+    if (!row) return;
+    const qty = parseFloat(row.querySelector('.po-inline-qty')?.value || 0);
+    const price = parseFloat(row.querySelector('.po-inline-price')?.value || 0);
+    const totalEl = row.querySelector('.row-total');
+    if (totalEl) {
+      totalEl.textContent = UtilityService.formatCurrency(qty * price);
+    }
+    this._updateGrandTotal();
+  },
+
+  _updateGrandTotal() {
+    let total = 0;
+    document.querySelectorAll('#poTableBody tr[data-item-id]').forEach(row => {
+      // Ambil nilai dari display atau edit mode
+      let qty, price;
+      
+      const qtyDisplay = row.querySelector('.po-inline-qty');
+      if (qtyDisplay && qtyDisplay.style.display !== 'none') {
+        qty = parseFloat(qtyDisplay.value || 0);
+        price = parseFloat(row.querySelector('.po-inline-price')?.value || 0);
+      } else {
+        // Ambil dari row-total yang sudah dihitung
+        const totalText = row.querySelector('.row-total')?.textContent || '';
+        const totalMatch = totalText.match(/[\d.,]+/);
+        if (totalMatch) {
+          total += parseFloat(totalMatch[0].replace(/\./g, '').replace(',', '.')) || 0;
+        }
+        return;
+      }
+      
+      if (!isNaN(qty) && !isNaN(price)) {
+        total += qty * price;
+      }
+    });
+    
+    const totalCell = document.getElementById('poGrandTotalCell');
+    if (totalCell) {
+      totalCell.textContent = UtilityService.formatCurrency(total);
+    }
+  },
+
+  // ============================================================
+  // STATUS BAR & BUTTON MANAGEMENT
+  // ============================================================
+  _showSaveButton() {
+    const saveBtn = document.getElementById('btnSaveAll');
+    if (saveBtn) {
+      saveBtn.style.display = '';
+    }
+  },
+
+  _hideSaveButton() {
+    const saveBtn = document.getElementById('btnSaveAll');
+    if (saveBtn) {
+      saveBtn.style.display = 'none';
+    }
+  },
+
+  _showStatusBar(message) {
+    const statusBar = document.getElementById('poStatusBar');
+    const statusText = document.getElementById('poStatusText');
+    if (statusBar && statusText) {
+      statusBar.style.display = '';
+      statusText.textContent = message || 'Ada perubahan yang belum disimpan.';
+    }
+  },
+
+  _hideStatusBar() {
+    const statusBar = document.getElementById('poStatusBar');
+    if (statusBar) {
+      statusBar.style.display = 'none';
+    }
+  },
+
+  _checkPendingEdits() {
+    const hasEdits = document.querySelector('#poTableBody .save-btn[style*="display:"]') !== null ||
+                     document.querySelector('#poTableBody .save-btn:not([style*="display: none"])')?.style.display !== 'none';
+    
+    if (hasEdits) {
+      this._showSaveButton();
+      this._showStatusBar();
+    } else {
+      this._hideSaveButton();
+      this._hideStatusBar();
+    }
   }
 };
-// Di akhir pembelian.js, tambahkan:
+
 export { ProcurementPage };
