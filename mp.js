@@ -54,7 +54,7 @@ const ManpowerPage = {
         <div class="page-header__filter mb-3 no-print">
           <label class="form-label mb-1 fw-semibold">Pilih Proyek</label>
           <select class="form-select" id="selectManpowerProject"
-            onchange="ManpowerPage.onProjectChange()" style="max-width:420px;">
+            onchange="ManpowerPage.onProjectChange()" style="max-width:820px;">
             <option value="">-- Pilih Proyek --</option>
           </select>
         </div>

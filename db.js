@@ -10,7 +10,7 @@ const BATCH_TIMEOUT    = 60000;
 const MAX_BATCH_SIZE   = 50;
 
 let _activeRequests = 0;
-const MAX_CONCURRENT   = 6; // ⬆️ dari 3 → 6 untuk HTTP/2
+const MAX_CONCURRENT   = 6;
 
 async function _fetchWithRetry(url, options = {}, retries = 3, delay = 1000, timeoutMs = DEFAULT_TIMEOUT) {
   let lastError;
@@ -96,18 +96,15 @@ function _scheduleIdleOrTimeout(cb, timeout = 1000) {
 }
 
 export const DB = {
-  // 🆕 Bulk getAll — 1 request untuk multiple sheets
   async getAllBulk(sheets) {
     if (!sheets || sheets.length === 0) return {};
     
     const key = 'bulk::' + sheets.join(',');
     
-    // Cek cache bulk
     if (AppCache.isValid(key, 'default', false)) {
       return AppCache.get(key);
     }
     
-    // Cek apakah semua sheet sudah ada di cache individual
     const allCached = sheets.every(sheet => {
       const sheetKey = AppCache.buildKey(sheet);
       return AppCache.isValid(sheetKey, sheet, false);
@@ -136,7 +133,6 @@ export const DB = {
       
       if (!json.ok) throw new Error(json.error || 'API error');
       
-      // Simpan masing-masing sheet ke cache
       Object.entries(json).forEach(([sheet, data]) => {
         if (data && data.rows !== undefined) {
           AppCache.set(AppCache.buildKey(sheet), data, sheet, {
@@ -150,7 +146,6 @@ export const DB = {
       return json;
     } catch (err) {
       console.warn('[DB] getAllBulk failed, falling back to individual requests:', err.message);
-      // Fallback: fetch satu per satu
       const results = {};
       await Promise.allSettled(sheets.map(async (sheet) => {
         try {
@@ -254,7 +249,7 @@ export const DB = {
   },
 
   async getProjectSummary(projectId) {
-    if (!projectId) return { jsa_count: 0, wm_count: 0, po_count: 0, mp_count: 0 };
+    if (!projectId) return { jsa_count: 0, wm_count: 0, po_count: 0, mp_count: 0, operational_count: 0, total_po: 0, total_operational: 0 };
     const key = 'summary::' + projectId;
     if (AppCache.isValid(key, 'default')) return AppCache.get(key);
     _showLoading();
@@ -288,7 +283,6 @@ export const DB = {
     } finally { _hideLoading(); }
   },
 
-  // 🔧 Optimasi: invalidasi lebih presisi
   async upsert(sheet, data) {
     const key      = AppCache.buildKey(sheet);
     const cached   = AppCache.get(key);
@@ -298,13 +292,11 @@ export const DB = {
     try {
       const r = await _post({ action: 'upsert', sheet, data });
       
-      // 🔧 Invalidasi lebih presisi
       AppCache.invalidateSheetOnly(sheet);
       if (data.project_id) {
         AppCache.invalidateByProject(sheet, data.project_id);
       }
-      // Hanya invalidate related jika sheet terkait project (yang ada project_id)
-      if (['jsa', 'work_methods', 'manpower', 'procurement', 'jadwal'].includes(sheet) && data.project_id) {
+      if (['jsa', 'work_methods', 'manpower', 'procurement', 'jadwal', 'operational'].includes(sheet) && data.project_id) {
         AppCache.invalidateByDependency(`projects:${data.project_id}`);
       }
       
@@ -391,12 +383,11 @@ export const DB = {
         allResults = r.rows || [];
       }
       
-      // 🔧 Invalidasi presisi
       Object.entries(affected).forEach(([sheet, projectIds]) => {
         AppCache.invalidateSheetOnly(sheet);
         projectIds.forEach(pid => {
           AppCache.invalidateByProject(sheet, pid);
-          if (['jsa', 'work_methods', 'manpower', 'procurement', 'jadwal'].includes(sheet)) {
+          if (['jsa', 'work_methods', 'manpower', 'procurement', 'jadwal', 'operational'].includes(sheet)) {
             AppCache.invalidateByDependency(`projects:${pid}`);
           }
         });
@@ -440,12 +431,8 @@ export const DB = {
   }
 };
 
-// ─────────────────────────────────────────────
-// 🆕 StorageService — Simplified (no redundant cache)
-// ─────────────────────────────────────────────
 export const StorageService = {
   async getData(sheet) {
-    // 🔧 Langsung gunakan AppCache tanpa cache terpisah
     try {
       const result = await DB.getAll(sheet);
       return result.rows || [];
@@ -472,7 +459,6 @@ export const StorageService = {
   },
 
   invalidateCache(sheet) {
-    // 🔧 Delegasikan ke AppCache
     AppCache.invalidateSheetOnly(sheet);
   },
 
@@ -481,9 +467,6 @@ export const StorageService = {
   }
 };
 
-// ─────────────────────────────────────────────
-// DataAccess
-// ─────────────────────────────────────────────
 export const DataAccess = {
   getCurrentUser() {
     const session = window.AuthService?.getCurrentUser?.();
@@ -571,6 +554,56 @@ export const DataAccess = {
     return results;
   },
   async deletePO(id)             { if (!id) return false; await DB.delete('procurement', id); StorageService.invalidateCache('procurement'); return true; },
+
+  // ============================================================
+  // OPERATIONAL COST METHODS (BARU)
+  // ============================================================
+  async getAllOperational()          { return StorageService.getData('operational'); },
+  async getOperationalById(id)       { return id ? DB.getById('operational', id) : null; },
+  async getOperationalByProject(pid) { 
+    if (!pid) return []; 
+    const r = await DB.getAll('operational', { filterField: 'project_id', filterValue: pid }); 
+    return r.rows || []; 
+  },
+  async saveOperational(data) { 
+    if (!data || !data.id) return null; 
+    data.updated_at = new Date().toISOString(); 
+    if (!data.created_at) data.created_at = new Date().toISOString(); 
+    await DB.upsert('operational', data); 
+    StorageService.invalidateCache('operational'); 
+    StorageService.addAuditLog('SAVE_OPERATIONAL', `Operational ${data.description || data.id} disimpan`); 
+    return data; 
+  },
+  async saveMultipleOperational(opArray) {
+    if (!opArray?.length) return [];
+    const affectedProjects = new Set();
+    const operations = opArray.map(op => { 
+      if (op.project_id) affectedProjects.add(op.project_id); 
+      return { 
+        sheet: 'operational', 
+        data: { 
+          ...op, 
+          updated_at: new Date().toISOString(), 
+          created_at: op.created_at || new Date().toISOString() 
+        } 
+      }; 
+    });
+    const results = await DB.batchUpsert(operations);
+    affectedProjects.forEach(pid => AppCache.invalidateSheetOnly('operational'));
+    return results;
+  },
+  async deleteOperational(id) { 
+    if (!id) return false; 
+    await DB.delete('operational', id); 
+    StorageService.invalidateCache('operational'); 
+    return true; 
+  },
+  async deleteOperationalByProject(pid) { 
+    if (!pid) return false; 
+    await DB.deleteWhere('operational', 'project_id', pid); 
+    AppCache.invalidateSheetOnly('operational'); 
+    return true; 
+  },
 
   async getAccounts()            { return StorageService.getData('accounts'); },
   async saveAccount(data)        { await DB.upsert('accounts', data); StorageService.invalidateCache('accounts'); return data; },

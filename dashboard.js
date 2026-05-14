@@ -17,7 +17,8 @@ const DashboardPage = {
       ${this._statCard('indigo', 'bi-diagram-3', EL.STAT_WORK_METHODS, 'Metode Kerja', ROUTES.METODE)}
       ${this._statCard('amber', 'bi-journal-check', EL.STAT_JSA, 'Total JSA', ROUTES.JSA)}
       ${this._statCard('cyan', 'bi-people', EL.STAT_MANPOWER, 'Man Power', ROUTES.MANPOWER)}
-      ${this._statCard('red', 'bi-cart', EL.STAT_PROCUREMENT, 'Pembelian', ROUTES.PEMBELIAN)}
+      ${this._statCard('purple', 'bi-cart', EL.STAT_PROCUREMENT, 'Pembelian', ROUTES.PEMBELIAN)}
+      ${this._statCard('teal', 'bi-calculator-fill', EL.STAT_OPERATIONAL, 'Operasional', ROUTES.PEMBELIAN)}
     </div>
     <div class="row g-3">
       <div class="col-md-6">
@@ -40,7 +41,18 @@ const DashboardPage = {
   },
 
   _statCard(color, icon, id, label, route) {
-    return `<div class="stat-card stat-card--${color} stat-card--clickable" onclick="UIService.navigate('${route}')">
+    const colorClass = {
+      blue: 'stat-card--blue',
+      green: 'stat-card--green',
+      indigo: 'stat-card--indigo',
+      amber: 'stat-card--amber',
+      cyan: 'stat-card--cyan',
+      red: 'stat-card--red',
+      purple: 'stat-card--purple',
+      teal: 'stat-card--teal'
+    }[color] || 'stat-card--blue';
+    
+    return `<div class="stat-card ${colorClass} stat-card--clickable" onclick="UIService.navigate('${route}')">
       <div class="stat-card__icon"><i class="bi ${icon}"></i></div>
       <div class="stat-card__value" id="${id}">-</div>
       <div class="stat-card__label">${label}</div>
@@ -71,11 +83,12 @@ const DashboardPage = {
       if (statCompanyEl) statCompanyEl.textContent = company ? '✓' : '-';
 
       const statMap = {
-        [EL.STAT_PROJECTS]: stats.totalProjects,
-        [EL.STAT_JSA]: stats.totalJSA,
-        [EL.STAT_WORK_METHODS]: stats.totalWorkMethods,
-        [EL.STAT_PROCUREMENT]: stats.totalPO,
-        [EL.STAT_MANPOWER]: stats.totalManpower,
+        [EL.STAT_PROJECTS]: stats.totalProjects || 0,
+        [EL.STAT_JSA]: stats.totalJSA || 0,
+        [EL.STAT_WORK_METHODS]: stats.totalWorkMethods || 0,
+        [EL.STAT_PROCUREMENT]: stats.totalPO || 0,
+        [EL.STAT_MANPOWER]: stats.totalManpower || 0,
+        [EL.STAT_OPERATIONAL]: stats.totalOperational || 0
       };
 
       Object.entries(statMap).forEach(([id, val]) => {

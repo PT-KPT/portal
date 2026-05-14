@@ -1,4 +1,4 @@
-// laporan.js — Report Page (async Google Sheets) - UPDATED with Lazy Loading Gantt Chart
+// laporan.js — Report Page (async Google Sheets) - UPDATED with Lazy Loading Gantt Chart & Operational Cost
 import { StorageService, DataAccess } from './db.js';
 import { AppError } from './error-handler.js';
 import { UtilityService, UIService } from './main.js';
@@ -6,8 +6,8 @@ import { UtilityService, UIService } from './main.js';
 const ReportPage = {
   _currentReportType: 'jsa',
   _loadedTabs: new Set(),
-  _data: { projects:[], jsa:[], wm:[], po:[], personnel:[], manpower:[], company:null, schedule:[] },
-  _ganttRenderer: null, // Cache untuk Gantt Renderer yang di-load secara lazy
+  _data: { projects:[], jsa:[], wm:[], po:[], operational:[], personnel:[], manpower:[], company:null, schedule:[] },
+  _ganttRenderer: null,
 
   render() {
     return `
@@ -42,8 +42,18 @@ const ReportPage = {
 
   async init() {
     this._loadedTabs = new Set();
-    this._data = { projects:[], jsa:[], wm:[], po:[], personnel:[], manpower:[], company:null, schedule:[] };
-    this._ganttRenderer = null; // Reset Gantt renderer cache
+    this._data = { 
+      projects: [], 
+      jsa: [], 
+      wm: [], 
+      po: [], 
+      operational: [], 
+      personnel: [], 
+      manpower: [], 
+      company: null, 
+      schedule: [] 
+    };
+    this._ganttRenderer = null;
 
     const [projects, company] = await Promise.all([
       DataAccess.getAllProjects(),
@@ -76,13 +86,11 @@ const ReportPage = {
   },
 
   async printReport() {
-    // Jika tab Jadwal aktif, pastikan Gantt sudah selesai render
     if (this._currentReportType === 'schedule') {
       const container = document.getElementById('ganttChartContainer');
       const isLoading = container?.querySelector('.skeleton-loading');
       if (isLoading) {
         UIService.showToast('Mohon tunggu, Timeline sedang dimuat...', 'info');
-        // Polling hingga skeleton hilang atau timeout 8 detik
         await new Promise(resolve => {
           const start = Date.now();
           const check = () => {
@@ -92,13 +100,11 @@ const ReportPage = {
           };
           check();
         });
-        // Beri waktu browser satu frame untuk paint final
         await new Promise(r => requestAnimationFrame(r));
         await new Promise(r => setTimeout(r, 100));
       }
     }
 
-    // Tunggu semua gambar (logo) selesai load
     const images = document.querySelectorAll('#reportOutput img, .report-header img');
     await Promise.allSettled(
       Array.from(images).map(img =>
@@ -142,6 +148,7 @@ const ReportPage = {
       }
       if (tab === 'po' && !this._data.po.length) {
         this._data.po = await DataAccess.getAllPO();
+        this._data.operational = await DataAccess.getAllOperational();
       }
       if (tab === 'manpower' && !this._data.personnel.length) {
         [this._data.personnel, this._data.manpower] = await Promise.all([
@@ -159,6 +166,7 @@ const ReportPage = {
     this._data.jsa = [];
     this._data.wm = [];
     this._data.po = [];
+    this._data.operational = [];
     this._data.personnel = [];
     this._data.manpower = [];
     this._data.schedule = [];
@@ -228,12 +236,6 @@ const ReportPage = {
     return `<tr><td class="col-width-28 fw-semibold" style="background:#f8fafc;">${UtilityService.escapeHtml(label)}</td><td>${value||'-'}</td></tr>`;
   },
 
-  /**
-   * Membangun header laporan.
-   * Menggunakan tabel dengan <thead> agar header OTOMATIS BERULANG di setiap halaman cetak.
-   * Semua build*Report harus diawali dengan buildReportHeader() dan
-   * diakhiri dengan buildReportFooter() agar struktur tabel tertutup dengan benar.
-   */
   buildReportHeader(company, title, titleIcon='bi-file-earmark-pdf') {
     const printDate = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
 
@@ -272,8 +274,6 @@ const ReportPage = {
         </div>`;
     }
 
-    // Tabel pembungkus: <thead> berisi header → browser mengulanginya di setiap halaman cetak
-    // <tbody> dibuka di sini dan DITUTUP oleh buildReportFooter()
     return `
       <table class="report-page-table">
         <thead>
@@ -287,7 +287,6 @@ const ReportPage = {
           <tr><td>`;
   },
 
-  /** Menutup struktur tabel yang dibuka oleh buildReportHeader() */
   buildReportFooter() {
     return `</td></tr></tbody></table>`;
   },
@@ -369,7 +368,6 @@ const ReportPage = {
         </button>
       </div>`;
     } else {
-      // Tampilkan skeleton Gantt dulu, lalu render async
       html += `<div id="ganttChartContainer" class="gantt-print-landscape">
         <div class="skeleton-loading">
           <div class="text-center mb-4">
@@ -385,7 +383,6 @@ const ReportPage = {
         </div>
       </div>`;
 
-      // Render Gantt chart secara asynchronous setelah DOM selesai
       setTimeout(async () => {
         try {
           const ganttHTML = await this.buildGanttChart(scheduleData, project);
@@ -406,11 +403,7 @@ const ReportPage = {
     return html + this.buildReportFooter();
   },
 
-  // ============================================================
-  // GANTT CHART - LAZY LOADING IMPLEMENTATION
-  // ============================================================
   async buildGanttChart(scheduleItems, project) {
-    // Dynamic import sub-module Gantt saat pertama kali dibutuhkan
     if (!this._ganttRenderer) {
       try {
         console.log('[ReportPage] Loading Gantt renderer module...');
@@ -429,9 +422,6 @@ const ReportPage = {
     return this._ganttRenderer.render(scheduleItems, project);
   },
 
-  // ============================================================
-  // JSA REPORT
-  // ============================================================
   buildJSAReport(projectId, company) {
     let list=[...this._data.jsa];
     if(projectId) list=list.filter(j=>j.project_id===projectId);
@@ -450,7 +440,6 @@ const ReportPage = {
       if(index>0) html+=`<hr style="border:2px dashed var(--color-border);margin:24px 0;">`;
       html+=`<div class="report-doc-block">`;
 
-      // Header dokumen (nomor, APD) — dilindungi dari page-break
       html+=`<div class="report-doc-block__header">`;
       html+=`<div class="report-section-title"><i></i>Detail Dokumen JSA</div>`;
       html+=`<table class="table table-bordered table-sm"><tbody>
@@ -462,13 +451,12 @@ const ReportPage = {
       const apdItems=[...((jsa.ppe?.selected_items)||[]),...((jsa.ppe?.custom_items)||[]).filter(Boolean)];
       html+=`<div class="report-section-title"><i></i>1. Alat Pelindung Diri (APD)</div>
       <div class="mb-3">${apdItems.length?apdItems.map(i=>`<span class="badge bg-primary text-white me-1 mb-1">${UtilityService.escapeHtml(i)}</span>`).join(''):'<span class="text-muted">Tidak ada APD yang dipilih</span>'}</div>`;
-      html+=`</div>`; // tutup report-doc-block__header
+      html+=`</div>`;
 
-      // Tabel bahaya — bebas mengalir antar halaman
       const hazards=jsa.hazard_identification||[];
       html+=`<div class="report-section-title"><i></i> 2. Identifikasi Bahaya & Pengendalian Risiko</div>
       <table class="table table-bordered table-sm table--data-flow"><thead><tr><th class="col-width-40">No</th><th>Tahapan Pekerjaan</th><th>Potensi Bahaya</th><th>Dampak</th><th>Pengendalian Risiko</th></tr></thead><tbody>`;
-      if(hazards.length) hazards.forEach((h,i)=>{ html+=`<tr><td class="text-center">${i+1}</td><td>${UtilityService.escapeHtml(h.step||'-')}</td><td>${UtilityService.escapeHtml(h.danger||'-')}</td><td>${UtilityService.escapeHtml(h.impact||'-')}</td><td>${UtilityService.escapeHtml(h.control||'-')}</td></tr>`; });
+      if(hazards.length) hazards.forEach((h,i)=>{ html+=`</td><td class="text-center">${i+1}</td><td>${UtilityService.escapeHtml(h.step||'-')}</td><td>${UtilityService.escapeHtml(h.danger||'-')}</td><td>${UtilityService.escapeHtml(h.impact||'-')}</td><td>${UtilityService.escapeHtml(h.control||'-')}</td></tr>`; });
       else html+=`<tr><td colspan="5" class="text-center text-muted">Tidak ada data identifikasi bahaya</td></tr>`;
       html+=`</tbody></table>`;
       
@@ -491,14 +479,11 @@ const ReportPage = {
       }
       
       html+=this.buildApprovalSection(jsa.prepared_by, jsa.reviewed_by, jsa.approved_by);
-      html+=`</div>`; // tutup report-doc-block
+      html+=`</div>`;
     });
     return html + this.buildReportFooter();
   },
 
-  // ============================================================
-  // WORK METHOD REPORT
-  // ============================================================
   buildWMReport(projectId, company) {
     let list=[...this._data.wm];
     if(projectId) list=list.filter(w=>w.project_id===projectId);
@@ -516,7 +501,6 @@ const ReportPage = {
       if(index>0) html+=`<hr style="border:2px dashed var(--color-border);margin:24px 0;">`;
       html+=`<div class="report-doc-block">`;
 
-      // Header dokumen — dilindungi dari page-break
       html+=`<div class="report-doc-block__header">`;
       html+=`<div class="report-section-title"><i></i>Detail Dokumen Metode Kerja</div>`;
       html+=`<table class="table table-bordered table-sm"><tbody>
@@ -524,118 +508,191 @@ const ReportPage = {
         ${this.createReportRow('Revisi',UtilityService.escapeHtml(wm.revision||'0'))}
         ${this.createReportRow('Tanggal Pembuatan',UtilityService.formatDate(wm.date))}
       </tbody></table>`;
-      html+=`</div>`; // tutup report-doc-block__header
+      html+=`</div>`;
 
-      // Tabel langkah kerja — bebas mengalir antar halaman
       const steps=wm.work_steps||[];
       html+=`<div class="report-section-title"><i class="bi bi-list-ol"></i> 1. Uraian Langkah Kerja</div>
       <table class="table table-bordered table-sm table--data-flow"><thead><tr><th class="col-width-40">No</th><th>Tahapan Kerja</th><th>Alat Kerja</th><th>Proses / Kegiatan Pekerjaan</th></tr></thead><tbody>`;
       if(steps.length) steps.forEach((s,i)=>{ html+=`<tr><td class="text-center">${i+1}</td><td>${UtilityService.escapeHtml(s.work_stage||'-')}</td><td>${UtilityService.escapeHtml(s.tools||'-')}</td><td>${UtilityService.escapeHtml(s.work_process||'-')}</td></tr>`; });
-      else html+=`<tr><td colspan="4" class="text-center text-muted">Tidak ada langkah kerja</td></tr>`;
+      else html+=`<tr><td colspan="4" class="text-center text-muted">Tidak ada langkah kerja</td></td>`;
       html+=`</tbody></table>`;
       
       html+=this.buildApprovalSection(wm.prepared_by, wm.reviewed_by, wm.approved_by);
-      html+=`</div>`; // tutup report-doc-block
+      html+=`</div>`;
     });
     return html + this.buildReportFooter();
   },
 
-  // ============================================================
-  // COST PROJECT REPORT (DIPERBAIKI - Tanpa Tabel Detail Keuangan)
-  // ============================================================
   buildPOReport(projectId, company) {
-    let list=[...this._data.po];
-    if(projectId) list=list.filter(p=>p.project_id===projectId);
+    let poList = [...this._data.po];
+    let opList = this._data.operational || [];
     
-    const project=projectId?this._data.projects.find(p=>p.id===projectId):null;
+    if (projectId) {
+      poList = poList.filter(p => p.project_id === projectId);
+      opList = opList.filter(o => o.project_id === projectId);
+    }
     
-    let html='';
-    html+=this.buildReportHeader(company,'COST PROJECT','bi-cart');
+    const project = projectId ? this._data.projects.find(p => p.id === projectId) : null;
     
-    if(project) {
-      html+=this.buildProjectInfoSection(project, true);
+    let html = '';
+    html += this.buildReportHeader(company, 'COST PROJECT & OPERASIONAL', 'bi-cart');
+    
+    if (project) {
+      html += this.buildProjectInfoSection(project, true);
     }
 
-    if(!list.length) {
-      html+=`<div class="flow-guard-banner">
+    // ============================================================
+    // TABEL MATERIAL (PEMBELIAN)
+    // ============================================================
+    html += `<div class="report-section-title"><i class="bi bi-box-seam"></i> A. Rincian Pembelian Material</div>`;
+    
+    if (!poList.length) {
+      html += `<div class="flow-guard-banner">
         <div class="flow-guard-banner__icon"><i class="bi bi-cart-x"></i></div>
-        <h5 class="flow-guard-banner__title">Belum Ada Data Pembelian</h5>
-        <p class="flow-guard-banner__description">Silakan tambahkan item pembelian melalui menu <strong>Cost Project</strong> terlebih dahulu.</p>
-        <button class="btn btn--primary no-print" onclick="UIService.navigate('pembelian')">
-          <i class="bi bi-cart"></i> Buka Cost Project
-        </button>
+        <h5 class="flow-guard-banner__title">Belum Ada Data Pembelian Material</h5>
+        <p class="flow-guard-banner__description">Silakan tambahkan item pembelian melalui menu <strong>Cost Project</strong> (Tab Material).</p>
       </div>`;
     } else {
-      const grandTotal=list.reduce((s,p)=>s+(p.total_price||0),0);
+      const materialTotal = poList.reduce((s, p) => s + (p.total_price || 0), 0);
       
-      html+=`<div class="report-section-title"><i class="bi bi-cart-check"></i> Daftar Item Pembelian</div>
-      <table class="table table-bordered table-sm"><thead><tr>
-        <th class="col-width-30">No</th>
-        <th>Nama Material</th>
-        <th>Spesifikasi</th>
-        <th>Toko / Supplier</th>
-        <th class="col-width-70 text-center">Qty / Unit</th>
-        <th class="col-width-100">Harga Satuan</th>
-        <th class="col-width-100">Total Harga</th>
-        <th class="col-width-80 no-print">Tanggal</th>
-      </tr></thead><tbody>`;
+      html += `<table class="table table-bordered table-sm"><thead>
+        <tr>
+          <th class="col-width-30">No</th>
+          <th>Tanggal</th>
+          <th>Nama Material</th>
+          <th>Spesifikasi</th>
+          <th>Toko / Supplier</th>
+          <th class="col-width-70 text-center">Qty / Unit</th>
+          <th class="col-width-100">Harga Satuan</th>
+          <th class="col-width-100">Total Harga</th>
+        </tr>
+      </thead><tbody>`;
       
-      list.forEach((po,i)=>{ 
-        html+=`<tr>
+      poList.forEach((po, i) => { 
+        html += `<tr>
           <td class="text-center">${i+1}</td>
-          <td><strong>${UtilityService.escapeHtml(po.material_name||'-')}</strong></td>
-          <td>${UtilityService.escapeHtml(po.specification||'-')}</td>
-          <td>${UtilityService.escapeHtml(po.supplier||'-')}</td>
-          <td class="text-center">${po.quantity||0} ${UtilityService.escapeHtml(po.unit||'')}</td>
+          <td>${UtilityService.formatDate(po.date)}</td>
+          <td><strong>${UtilityService.escapeHtml(po.material_name || '-')}</strong></td>
+          <td>${UtilityService.escapeHtml(po.specification || '-')}</td>
+          <td>${UtilityService.escapeHtml(po.supplier || '-')}</td>
+          <td class="text-center">${po.quantity || 0} ${UtilityService.escapeHtml(po.unit || '')}</td>
           <td class="text-end">${UtilityService.formatCurrency(po.unit_price)}</td>
           <td class="text-end"><strong>${UtilityService.formatCurrency(po.total_price)}</strong></td>
-          <td class="text-center no-print">${UtilityService.formatDate(po.date)}</td>
         </tr>`; 
       });
       
-      html+=`</tbody><tfoot><tr class="fw-bold" style="background:#f0f9ff;">
-        <td colspan="6" class="text-end">TOTAL KESELURUHAN:</td>
-        <td class="text-end"><strong class="text-success">${UtilityService.formatCurrency(grandTotal)}</strong></td>
-        <td class="no-print"></td>
+      html += `</tbody><tfoot><tr class="fw-bold" style="background:#f0f9ff;">
+        <td colspan="7" class="text-end">TOTAL MATERIAL:</td>
+        <td class="text-end"><strong class="text-success">${UtilityService.formatCurrency(materialTotal)}</strong></td>
       </tr></tfoot></table>`;
-      
-      html+=`<div class="report-summary-box"><div class="row">
-        <div class="col-6"><strong>Total Item:</strong> ${list.length}</div>
-        <div class="col-6 text-end"><strong>Grand Total:</strong> <span class="text-success" style="font-size:1.1rem;">${UtilityService.formatCurrency(grandTotal)}</span></div>
-      </div></div>`;
     }
 
     // ============================================================
-    // RINGKASAN KEUANGAN PROYEK (HANYA Kartu + Progress Bar)
+    // TABEL OPERASIONAL
     // ============================================================
-    if(project) {
+    html += `<div class="report-section-title mt-4"><i class="bi bi-calculator-fill"></i> B. Rincian Biaya Operasional</div>`;
+    
+    const categoryLabels = {
+      labor: '🧑‍🔧 Tenaga Kerja', equipment: '🏗️ Peralatan', transport: '🚛 Transportasi',
+      accommodation: '🏠 Akomodasi', administration: '📋 Administrasi', communication: '📱 Komunikasi',
+      safety: '🩺 K3 & Keamanan', other: '📦 Lain-lain'
+    };
+    
+    if (!opList.length) {
+      html += `<div class="flow-guard-banner">
+        <div class="flow-guard-banner__icon"><i class="bi bi-receipt"></i></div>
+        <h5 class="flow-guard-banner__title">Belum Ada Data Biaya Operasional</h5>
+        <p class="flow-guard-banner__description">Silakan tambahkan biaya operasional melalui menu <strong>Cost Project</strong> (Tab Operasional).</p>
+      </div>`;
+    } else {
+      const operationalTotal = opList.reduce((s, o) => s + (o.total_price || 0), 0);
+      
+      html += `<table class="table table-bordered table-sm"><thead>
+        <tr>
+          <th class="col-width-30">No</th>
+          <th>Tanggal</th>
+          <th>Kategori</th>
+          <th>Deskripsi</th>
+          <th class="col-width-70 text-center">Qty / Unit</th>
+          <th class="col-width-100">Harga Satuan</th>
+          <th class="col-width-100">Total Harga</th>
+          <th>Catatan</th>
+        </tr>
+      </thead><tbody>`;
+      
+      opList.forEach((op, i) => { 
+        html += `<tr>
+          <td class="text-center">${i+1}</td>
+          <td>${UtilityService.formatDate(op.date)}</td>
+          <td><span class="badge bg-info">${categoryLabels[op.category] || op.category || '-'}</span></td>
+          <td><strong>${UtilityService.escapeHtml(op.description || '-')}</strong></td>
+          <td class="text-center">${op.quantity || 0} ${UtilityService.escapeHtml(op.unit || '')}</td>
+          <td class="text-end">${UtilityService.formatCurrency(op.unit_price)}</td>
+          <td class="text-end"><strong>${UtilityService.formatCurrency(op.total_price)}</strong></td>
+          <td>${UtilityService.escapeHtml(op.notes || '-')}</td>
+        </tr>`; 
+      });
+      
+      html += `</tbody><tfoot><tr class="fw-bold" style="background:#f0f9ff;">
+        <td colspan="7" class="text-end">TOTAL OPERASIONAL:</td>
+        <td class="text-end"><strong class="text-success">${UtilityService.formatCurrency(operationalTotal)}</strong></td>
+      </table></tfoot></table>`;
+    }
+
+    // ============================================================
+    // RINGKASAN KEUANGAN PROYEK (TERPISAH)
+    // ============================================================
+    if (project) {
       const budget = project.contract_value || 0;
-      const totalPO = list.reduce((s, p) => s + (p.total_price || 0), 0);
-      const remaining = budget - totalPO;
-      const pct = budget > 0 ? Math.round((totalPO / budget) * 100) : (totalPO > 0 ? 100 : 0);
-      const pctDisplay = budget > 0 ? `${pct}%` : (totalPO > 0 ? 'Melebihi Anggaran' : '0%');
+      const totalMaterial = poList.reduce((s, p) => s + (p.total_price || 0), 0);
+      const totalOperational = opList.reduce((s, o) => s + (o.total_price || 0), 0);
+      const totalExpense = totalMaterial + totalOperational;
+      const remaining = budget - totalExpense;
+      const pct = budget > 0 ? Math.round((totalExpense / budget) * 100) : (totalExpense > 0 ? 100 : 0);
+      const pctDisplay = budget > 0 ? `${pct}%` : (totalExpense > 0 ? 'Melebihi Anggaran' : '0%');
 
       html += `<div class="page-break"></div>`;
       html += `<div class="page-break-inside-avoid">`;
-      html += `<div class="report-section-title"><i class="bi bi-cash-stack"></i> Ringkasan Keuangan Proyek</div>`;
+      html += `<div class="report-section-title"><i class="bi bi-cash-stack"></i> C. Ringkasan Keuangan Proyek</div>`;
       
       html += `<div class="row g-3 mb-3">
-        <div class="col-4">
-          <div class="report-finance-card report-finance-card--info">
+        <div class="col-3">
+          <div class="report-finance-card report-finance-card--info text-center">
             <div class="report-finance-card__label">Nilai Kontrak</div>
             <div class="report-finance-card__value">${UtilityService.formatCurrency(budget)}</div>
           </div>
         </div>
-        <div class="col-4">
-          <div class="report-finance-card report-finance-card--warning">
-            <div class="report-finance-card__label">Total Pembelian</div>
-            <div class="report-finance-card__value">${UtilityService.formatCurrency(totalPO)}</div>
+        <div class="col-3">
+          <div class="report-finance-card report-finance-card--warning text-center">
+            <div class="report-finance-card__label">Total Material</div>
+            <div class="report-finance-card__value">${UtilityService.formatCurrency(totalMaterial)}</div>
           </div>
         </div>
-        <div class="col-4">
-          <div class="report-finance-card ${remaining >= 0 ? 'report-finance-card--success' : 'report-finance-card--danger'}">
+        <div class="col-3">
+          <div class="report-finance-card report-finance-card--warning text-center">
+            <div class="report-finance-card__label">Total Operasional</div>
+            <div class="report-finance-card__value">${UtilityService.formatCurrency(totalOperational)}</div>
+          </div>
+        </div>
+        <div class="col-3">
+          <div class="report-finance-card report-finance-card--success text-center">
+            <div class="report-finance-card__label">Total Pengeluaran</div>
+            <div class="report-finance-card__value">${UtilityService.formatCurrency(totalExpense)}</div>
+          </div>
+        </div>
+      </div>`;
+      
+      html += `<div class="row g-3 mb-3">
+        <div class="col-6">
+          <div class="report-finance-card ${remaining >= 0 ? 'report-finance-card--success' : 'report-finance-card--danger'} text-center">
             <div class="report-finance-card__label">Sisa Anggaran</div>
             <div class="report-finance-card__value">${UtilityService.formatCurrency(remaining)}</div>
+          </div>
+        </div>
+        <div class="col-6">
+          <div class="report-finance-card report-finance-card--info text-center">
+            <div class="report-finance-card__label">Persentase Penggunaan</div>
+            <div class="report-finance-card__value">${pctDisplay}</div>
           </div>
         </div>
       </div>`;
@@ -652,9 +709,6 @@ const ReportPage = {
     return html + this.buildReportFooter();
   },
 
-  // ============================================================
-  // MANPOWER REPORT
-  // ============================================================
   buildManpowerReport(projectId, company) {
     const E = UtilityService.escapeHtml.bind(UtilityService);
     const fmtDate = UtilityService.formatDate.bind(UtilityService);
@@ -720,7 +774,7 @@ const ReportPage = {
             + '<td>' + E(w.address||'—') + '</td>'
             + '</tr>';
         });
-        html += '</tbody></table>';
+        html += '</tbody></td>';
         html += '<div class="report-summary-box"><div class="row">'
           + '<div class="col-6"><strong>Total Personel:</strong> ' + workers.length + ' orang</div>'
           + '<div class="col-6 text-end"><strong>Tanggal Cetak:</strong> '
@@ -758,5 +812,4 @@ const ReportPage = {
   }
 };
 
-// Export untuk dynamic import
 export { ReportPage };

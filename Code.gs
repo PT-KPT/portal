@@ -9,12 +9,12 @@ const SHEETS = {
   personnel:    { name: 'personnel',    headers: ['id','name','nik','birth_date','address','position','updated_at'] },
   manpower:     { name: 'manpower',     headers: ['id','project_id','personnel_id','updated_at'] },
   procurement:  { name: 'procurement',  headers: ['id','project_id','material_name','specification','quantity','unit','unit_price','total_price','supplier','date','created_at','updated_at'] },
+  operational:  { name: 'operational',  headers: ['id','project_id','date','category','description','quantity','unit','unit_price','total_price','notes','created_at','updated_at'] },
   accounts:     { name: 'accounts',     headers: ['username','password','role','name'] },
   jadwal:       { name: 'jadwal',       headers: ['id','project_id','work_method_id','document_number','step_number','work_stage','work_process','start_date','end_date','updated_at'] },
 };
 
-// Kolom tanggal yang harus dikembalikan sebagai yyyy-MM-dd (bukan ISO string penuh)
-// agar langsung kompatibel dengan input[type="date"] di browser
+// Kolom tanggal yang harus dikembalikan sebagai yyyy-MM-dd
 const DATE_ONLY_FIELDS = new Set([
   'start_date', 'end_date', 'birth_date', 'date'
 ]);
@@ -59,7 +59,6 @@ function doGet(e) {
     if (action === 'getRecent')return jsonOk(getRecentOptimized(e.parameter.sheet, parseInt(e.parameter.limit) || 5));
     if (action === 'getSummary')return jsonOk(getProjectSummary(e.parameter.projectId));
     
-    // 🆕 BULK ENDPOINT — 1 request untuk multiple sheets
     if (action === 'getBulk') {
       const sheets = (e.parameter.sheets || '').split(',').filter(function(s) { return s.trim() !== ''; });
       const results = {};
@@ -115,7 +114,6 @@ function getAllOptimized(sheetName, opts) {
   const result  = { rows: [], total: 0 };
   if (lastRow < 2) return result;
 
-  // Tentukan kolom yang akan dikembalikan (partial select)
   let colIndices  = headers.map(function(_, i) { return i; });
   let readHeaders = headers;
   if (opts.fields && opts.fields.length > 0) {
@@ -127,7 +125,6 @@ function getAllOptimized(sheetName, opts) {
   let   filtered = values.filter(function(row) { return row[0] !== '' && row[0] !== null && row[0] !== undefined; });
   result.total   = filtered.length;
 
-  // Filter
   if (opts.filterField && opts.filterValue !== undefined && opts.filterValue !== null && opts.filterValue !== '') {
     const ci = headers.indexOf(opts.filterField);
     if (ci !== -1) {
@@ -144,7 +141,6 @@ function getAllOptimized(sheetName, opts) {
     }
   }
 
-  // Sort berdasarkan updated_at lalu created_at (terbaru di atas)
   const dateCI    = headers.indexOf('updated_at');
   const createdCI = headers.indexOf('created_at');
   if (dateCI !== -1 || createdCI !== -1) {
@@ -157,10 +153,8 @@ function getAllOptimized(sheetName, opts) {
     });
   }
 
-  // Pagination
   if (opts.limit > 0) filtered = filtered.slice(opts.offset || 0, (opts.offset || 0) + opts.limit);
 
-  // Map ke objek
   result.rows = filtered.map(function(row) {
     if (opts.fields && colIndices.length > 0 && colIndices.length < headers.length) {
       const obj = {};
@@ -172,12 +166,6 @@ function getAllOptimized(sheetName, opts) {
   return result;
 }
 
-/**
- * FIX: Sebelumnya mengambil N baris terakhir berdasarkan POSISI di sheet,
- * bukan berdasarkan tanggal terbaru. Jika data di-edit, baris tidak berpindah
- * posisi sehingga tidak muncul di "Terbaru".
- * SEKARANG: Ambil semua data, sort by updated_at/created_at, ambil N teratas.
- */
 function getRecentOptimized(sheetName, limit) {
   const ws      = getOrCreateSheet(sheetName);
   const headers = SHEETS[sheetName].headers;
@@ -187,7 +175,6 @@ function getRecentOptimized(sheetName, limit) {
   const values   = ws.getRange(2, 1, lastRow - 1, headers.length).getValues();
   let   filtered = values.filter(function(row) { return row[0] !== '' && row[0] !== null && row[0] !== undefined; });
 
-  // Sort by updated_at DESC lalu created_at DESC
   const dateCI    = headers.indexOf('updated_at');
   const createdCI = headers.indexOf('created_at');
   if (dateCI !== -1 || createdCI !== -1) {
@@ -249,7 +236,7 @@ function getCounts(sheetNames) {
 
 function getDashboardStats() {
   const ss         = _getSpreadsheet();
-  const sheetNames = ['projects', 'jsa', 'work_methods', 'procurement', 'manpower'];
+  const sheetNames = ['projects', 'jsa', 'work_methods', 'procurement', 'manpower', 'operational'];
   const counts     = {};
   sheetNames.forEach(function(name) {
     const ws = ss.getSheetByName(SHEETS[name].name);
@@ -264,23 +251,74 @@ function getDashboardStats() {
     totalJSA:         counts['jsa'],
     totalWorkMethods: counts['work_methods'],
     totalPO:          counts['procurement'],
-    totalManpower:    counts['manpower']
+    totalManpower:    counts['manpower'],
+    totalOperational: counts['operational']
   };
 }
 
 function getProjectSummary(projectId) {
   if (!projectId) throw new Error('projectId required');
-  const ss      = _getSpreadsheet();
-  const summary = { jsa_count: 0, wm_count: 0, po_count: 0, mp_count: 0 };
-  const map     = { jsa: 'jsa_count', work_methods: 'wm_count', procurement: 'po_count', manpower: 'mp_count' };
-  for (const [sheetName, countKey] of Object.entries(map)) {
+  const ss = _getSpreadsheet();
+  const summary = { 
+    jsa_count: 0, 
+    wm_count: 0, 
+    po_count: 0, 
+    mp_count: 0, 
+    operational_count: 0, 
+    total_po: 0, 
+    total_operational: 0 
+  };
+  
+  const countSheets = {
+    jsa: 'jsa_count',
+    work_methods: 'wm_count', 
+    procurement: 'po_count',
+    manpower: 'mp_count',
+    operational: 'operational_count'
+  };
+  
+  for (const [sheetName, countKey] of Object.entries(countSheets)) {
     const ws = ss.getSheetByName(SHEETS[sheetName].name);
     if (!ws || ws.getLastRow() < 2) continue;
-    const projCol = SHEETS[sheetName].headers.indexOf('project_id');
+    const headers = SHEETS[sheetName].headers;
+    const projCol = headers.indexOf('project_id');
     if (projCol === -1) continue;
-    const vals       = ws.getRange(2, projCol + 1, ws.getLastRow() - 1, 1).getValues().flat();
+    const vals = ws.getRange(2, projCol + 1, ws.getLastRow() - 1, 1).getValues().flat();
     summary[countKey] = vals.filter(function(v) { return String(v) === String(projectId); }).length;
   }
+  
+  const poWs = ss.getSheetByName(SHEETS.procurement.name);
+  if (poWs && poWs.getLastRow() >= 2) {
+    const headers = SHEETS.procurement.headers;
+    const projCol = headers.indexOf('project_id');
+    const totalCol = headers.indexOf('total_price');
+    if (projCol !== -1 && totalCol !== -1) {
+      const values = poWs.getRange(2, 1, poWs.getLastRow() - 1, headers.length).getValues();
+      summary.total_po = values.reduce(function(sum, row) {
+        if (String(row[projCol]) === String(projectId)) {
+          return sum + (parseFloat(row[totalCol]) || 0);
+        }
+        return sum;
+      }, 0);
+    }
+  }
+  
+  const opWs = ss.getSheetByName(SHEETS.operational.name);
+  if (opWs && opWs.getLastRow() >= 2) {
+    const headers = SHEETS.operational.headers;
+    const projCol = headers.indexOf('project_id');
+    const totalCol = headers.indexOf('total_price');
+    if (projCol !== -1 && totalCol !== -1) {
+      const values = opWs.getRange(2, 1, opWs.getLastRow() - 1, headers.length).getValues();
+      summary.total_operational = values.reduce(function(sum, row) {
+        if (String(row[projCol]) === String(projectId)) {
+          return sum + (parseFloat(row[totalCol]) || 0);
+        }
+        return sum;
+      }, 0);
+    }
+  }
+  
   return summary;
 }
 
@@ -293,7 +331,6 @@ function upsert(sheetName, data) {
   const headers = SHEETS[sheetName].headers;
   const idCol   = headers.indexOf('id');
 
-  // Sheet tanpa kolom id (misalnya accounts yang pakai username sebagai key)
   if (idCol === -1) {
     const keyCol  = headers.indexOf('username');
     const lastRow = ws.getLastRow();
@@ -310,7 +347,6 @@ function upsert(sheetName, data) {
     return data;
   }
 
-  // Cari baris yang sudah ada berdasarkan id
   const lastRow = ws.getLastRow();
   if (lastRow >= 2) {
     const finder = ws.getRange(2, idCol + 1, lastRow - 1, 1)
@@ -349,20 +385,12 @@ function deleteWhere(sheetName, field, value) {
   if (lastRow < 2) return 0;
   const vals    = ws.getRange(2, col + 1, lastRow - 1, 1).getValues();
   let   deleted = 0;
-  // Iterasi dari bawah ke atas agar row index tidak bergeser saat delete
   for (let i = vals.length - 1; i >= 0; i--) {
     if (String(vals[i][0]) === String(value)) { ws.deleteRow(i + 2); deleted++; }
   }
   return deleted;
 }
 
-/**
- * FIX: Versi lama memanggil ws.getLastRow() di dalam loop setelah melakukan
- * setValues() pada baris yang ada, lalu memanggil ws.getLastRow()+1 untuk 
- * newRows. Ini bisa tidak akurat jika ada multiple sheets dalam satu batch.
- * SEKARANG: Hitung startRow untuk insert baru sekali saja setelah semua update selesai,
- * menggunakan ws.getLastRow() yang fresh.
- */
 function batchUpsert(operations) {
   const results = [];
   const grouped = {};
@@ -378,13 +406,11 @@ function batchUpsert(operations) {
     const headers = SHEETS[sheetName].headers;
     const idCol   = headers.indexOf('id');
 
-    // Sheet tanpa id — fallback ke upsert satu per satu
     if (idCol === -1) {
       dataArray.forEach(function(data) { results.push(upsert(sheetName, data)); });
       continue;
     }
 
-    // Baca semua id yang sudah ada
     const lastRow    = ws.getLastRow();
     const existingIds = {};
     if (lastRow >= 2) {
@@ -392,7 +418,6 @@ function batchUpsert(operations) {
       idVals.forEach(function(v, i) { if (v[0] !== '' && v[0] !== null) existingIds[String(v[0])] = i + 2; });
     }
 
-    // Pisahkan: yang sudah ada (update) dan yang baru (insert)
     const newRows = [];
     dataArray.forEach(function(data) {
       const rowNum = existingIds[String(data.id)];
@@ -404,7 +429,6 @@ function batchUpsert(operations) {
       results.push(data);
     });
 
-    // Insert baru: ambil lastRow SETELAH semua update selesai agar akurat
     if (newRows.length > 0) {
       const insertAt = ws.getLastRow() + 1;
       ws.getRange(insertAt, 1, newRows.length, headers.length).setValues(newRows);
@@ -432,7 +456,6 @@ function batchDelete(operations) {
     const targetSet  = new Set(grp.values);
     const rowsToDelete = [];
     vals.forEach(function(v, i) { if (targetSet.has(String(v[0]))) rowsToDelete.push(i + 2); });
-    // Hapus dari bawah ke atas
     for (let i = rowsToDelete.length - 1; i >= 0; i--) { ws.deleteRow(rowsToDelete[i]); totalDeleted++; }
   }
   return totalDeleted;
@@ -440,7 +463,7 @@ function batchDelete(operations) {
 
 function deleteProjectCascade(projectId) {
   if (!projectId) throw new Error('projectId wajib diisi');
-  ['jsa', 'work_methods', 'procurement', 'manpower', 'jadwal'].forEach(function(sheetName) {
+  ['jsa', 'work_methods', 'procurement', 'manpower', 'jadwal', 'operational'].forEach(function(sheetName) {
     deleteWhere(sheetName, 'project_id', projectId);
   });
   deleteRow('projects', projectId);
@@ -463,7 +486,6 @@ function initAllSheets() {
       ws.setFrozenRows(1);
     }
   });
-  // Buat akun default jika belum ada
   const accountWs = ss.getSheetByName('accounts');
   if (accountWs && accountWs.getLastRow() <= 1) {
     const defaults = [
@@ -496,21 +518,9 @@ function getOrCreateSheet(sheetName) {
 // DATA CONVERSION HELPERS
 // ─────────────────────────────────────────────────────────────
 
-/**
- * FIX: Sebelumnya semua Date object dikembalikan sebagai ISO string penuh
- * (e.g. "2026-05-04T17:00:00.000Z"), menyebabkan error di input[type="date"] browser
- * yang hanya menerima format "yyyy-MM-dd".
- * 
- * SEKARANG: Kolom yang ada di DATE_ONLY_FIELDS dikembalikan sebagai "yyyy-MM-dd".
- * Menggunakan waktu Jakarta (GMT+7) untuk memastikan tanggal yang ditampilkan
- * sesuai dengan locale Indonesia, bukan UTC.
- * Kolom lain (created_at, updated_at) tetap sebagai ISO string penuh.
- */
 function _parseValue(v, fieldName) {
   if (v instanceof Date) {
     if (fieldName && DATE_ONLY_FIELDS.has(fieldName)) {
-      // Kembalikan sebagai yyyy-MM-dd menggunakan waktu Jakarta (GMT+7)
-      // agar tanggal tidak mundur 1 hari karena perbedaan timezone
       const jakartaTime = new Date(v.getTime() + JAKARTA_OFFSET_MS);
       const yyyy = jakartaTime.getUTCFullYear();
       const mm   = String(jakartaTime.getUTCMonth() + 1).padStart(2, '0');
@@ -523,42 +533,28 @@ function _parseValue(v, fieldName) {
   if (typeof v === 'string' && (v.startsWith('{') || v.startsWith('['))) {
     try { return JSON.parse(v); } catch (e) {}
   }
-  // String tanggal yang sudah dalam format yyyy-MM-dd — kembalikan apa adanya
   if (fieldName && DATE_ONLY_FIELDS.has(fieldName) && typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) {
     return v.substring(0, 10);
   }
   return v;
 }
 
-/**
- * FIX: Konversi data dari objek ke row untuk disimpan di Google Sheets.
- * Untuk kolom tanggal (DATE_ONLY_FIELDS), kita perlu memastikan data disimpan
- * sebagai string "yyyy-MM-dd" agar tidak terjadi konversi timezone oleh Google Sheets.
- * 
- * Jika data sudah dalam format string "yyyy-MM-dd", simpan sebagai string.
- * Jika data adalah ISO string atau Date object, konversi ke "yyyy-MM-dd" waktu Jakarta.
- */
 function objToRow(headers, obj) {
   return headers.map(function(h) {
     let v = obj[h];
     if (v === undefined || v === null) return '';
     
-    // Untuk kolom tanggal-only, pastikan format yyyy-MM-dd
     if (DATE_ONLY_FIELDS.has(h) && v) {
       const dateStr = _toJakartaDateString(v);
       if (dateStr) return dateStr;
     }
     
     if (typeof v === 'object') return JSON.stringify(v);
-    // Cegah injeksi formula Google Sheets
     const s = String(v);
     return s.startsWith('=') ? "'" + s : s;
   });
 }
 
-/**
- * Konversi berbagai format tanggal ke string yyyy-MM-dd waktu Jakarta
- */
 function _toJakartaDateString(v) {
   if (!v) return '';
   
@@ -567,11 +563,9 @@ function _toJakartaDateString(v) {
   if (v instanceof Date) {
     dateObj = v;
   } else if (typeof v === 'string') {
-    // Cek apakah sudah format yyyy-MM-dd
     if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
-      return v; // Sudah benar, kembalikan apa adanya
+      return v;
     }
-    // Coba parse ISO string atau format lainnya
     dateObj = new Date(v);
     if (isNaN(dateObj.getTime())) return '';
   } else if (typeof v === 'number') {
@@ -581,7 +575,6 @@ function _toJakartaDateString(v) {
   
   if (!dateObj || isNaN(dateObj.getTime())) return '';
   
-  // Konversi ke waktu Jakarta (GMT+7)
   const jakartaTime = new Date(dateObj.getTime() + JAKARTA_OFFSET_MS);
   const yyyy = jakartaTime.getUTCFullYear();
   const mm   = String(jakartaTime.getUTCMonth() + 1).padStart(2, '0');
@@ -625,7 +618,6 @@ function handleLogin(username, password) {
     if (!row[uCol] || String(row[uCol]).toLowerCase() !== username.toLowerCase()) continue;
 
     let storedPw = String(row[pwCol] || '');
-    // Migrasi otomatis: jika password tersimpan plain text (< 64 char), hash terlebih dulu
     if (storedPw.length < 64) storedPw = hashPassword(storedPw);
 
     if (storedPw !== inputHash) throw new Error('Username atau password salah.');
@@ -649,7 +641,6 @@ function handleSaveAccount(payload) {
   if (password && password.trim() !== '') {
     finalPasswordHash = hashPassword(password);
   } else {
-    // Edit tanpa ubah password — ambil hash yang sudah ada
     const ws      = getOrCreateSheet('accounts');
     const headers = SHEETS.accounts.headers;
     const lastRow = ws.getLastRow();
@@ -665,7 +656,6 @@ function handleSaveAccount(payload) {
     if (!finalPasswordHash) throw new Error('Password wajib diisi untuk akun baru.');
   }
 
-  // Jika username berubah, hapus record lama terlebih dulu
   if (oldUsername && oldUsername.trim() !== '' && oldUsername !== username) {
     deleteWhere('accounts', 'username', oldUsername);
   }

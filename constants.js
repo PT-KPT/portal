@@ -30,6 +30,7 @@ export const SHEETS = Object.freeze({
   PERSONNEL:   'personnel',
   MANPOWER:    'manpower',
   PROCUREMENT: 'procurement',
+  OPERATIONAL: 'operational',  // <-- BARIS INI DITAMBAHKAN
   ACCOUNTS:    'accounts',
   SCHEDULE:    'jadwal',
 });
