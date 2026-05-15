@@ -1,4 +1,4 @@
-// db.js — ES6 Module v2.2 with Bulk Operations & Optimized Cache
+// db.js — ES6 Module v3.0 - FIXED: Race condition, batch operation deadlock, loading spinner
 import { GS_API_URL, GS_API_TOKEN } from './config.js';
 import { AppCache } from './cache.js';
 
@@ -10,39 +10,68 @@ const BATCH_TIMEOUT    = 60000;
 const MAX_BATCH_SIZE   = 50;
 
 let _activeRequests = 0;
-const MAX_CONCURRENT   = 6;
+const MAX_CONCURRENT   = 4;
+let _loadingCounter = 0;
+let _loadingTimer = null;
+let _isDestroyed = false;
+
+// Abort controller untuk request yang sedang berjalan
+let _activeControllers = new Set();
 
 async function _fetchWithRetry(url, options = {}, retries = 3, delay = 1000, timeoutMs = DEFAULT_TIMEOUT) {
   let lastError;
-  while (_activeRequests >= MAX_CONCURRENT) {
-    await new Promise(r => setTimeout(r, 100));
-  }
-  _activeRequests++;
-  try {
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-        const controller = new AbortController();
-        const tid = setTimeout(() => controller.abort(), timeoutMs);
-        const response = await fetch(url, { ...options, signal: controller.signal });
-        clearTimeout(tid);
-        if (response.ok || (response.status >= 400 && response.status < 500)) return response;
-        lastError = new Error(`Server error: ${response.status}`);
-      } catch (error) {
-        lastError = error.name === 'AbortError'
-          ? new Error(`Request timeout setelah ${timeoutMs / 1000} detik`)
-          : error;
+  let attempt = 1;
+  
+  while (attempt <= retries) {
+    let controller = null;
+    try {
+      while (_activeRequests >= MAX_CONCURRENT && !_isDestroyed) {
+        await new Promise(r => setTimeout(r, 100));
       }
-      if (attempt === retries) throw lastError;
-      const wait = delay * Math.pow(2, attempt - 1) + Math.random() * 500;
-      console.warn(`[DB] Retry ${attempt}/${retries} setelah ${Math.round(wait / 1000)}s:`, lastError.message);
-      await new Promise(r => setTimeout(r, wait));
+      if (_isDestroyed) throw new Error('DB service destroyed');
+      
+      _activeRequests++;
+      controller = new AbortController();
+      _activeControllers.add(controller);
+      
+      const tid = setTimeout(() => controller.abort(), timeoutMs);
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(tid);
+      
+      _activeControllers.delete(controller);
+      _activeRequests--;
+      
+      if (response.ok || (response.status >= 400 && response.status < 500)) return response;
+      lastError = new Error(`Server error: ${response.status}`);
+    } catch (error) {
+      if (controller) _activeControllers.delete(controller);
+      _activeRequests--;
+      lastError = error.name === 'AbortError'
+        ? new Error(`Request timeout setelah ${timeoutMs / 1000} detik`)
+        : error;
     }
-  } finally {
-    _activeRequests--;
+    
+    if (attempt === retries) throw lastError;
+    const wait = delay * Math.pow(2, attempt - 1) + Math.random() * 500;
+    console.warn(`[DB] Retry ${attempt}/${retries} setelah ${Math.round(wait / 1000)}s:`, lastError?.message);
+    await new Promise(r => setTimeout(r, wait));
+    attempt++;
   }
+  throw lastError;
+}
+
+// FIX: Abort semua request yang sedang berjalan
+export function abortAllRequests() {
+  _isDestroyed = true;
+  _activeControllers.forEach(controller => {
+    try { controller.abort(); } catch(e) {}
+  });
+  _activeControllers.clear();
+  _showLoadingForceHide();
 }
 
 async function _get(params) {
+  if (_isDestroyed) throw new Error('DB service destroyed');
   if (!GS_URL) throw new Error('GS_API_URL belum dikonfigurasi.');
   if (params.action !== 'ping' && GS_TOKEN) params.token = GS_TOKEN;
   const sp = new URLSearchParams();
@@ -54,6 +83,7 @@ async function _get(params) {
 }
 
 async function _post(body, timeoutMs = DEFAULT_TIMEOUT) {
+  if (_isDestroyed) throw new Error('DB service destroyed');
   if (!GS_URL) throw new Error('GS_API_URL belum dikonfigurasi.');
   if (body.action !== 'login' && GS_TOKEN) body.token = GS_TOKEN;
   const res  = await _fetchWithRetry(GS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }, 3, 1000, timeoutMs);
@@ -62,14 +92,13 @@ async function _post(body, timeoutMs = DEFAULT_TIMEOUT) {
   return json;
 }
 
-let _loadingCount = 0;
-let _loadingTimer = null;
-
+// FIX: Loading spinner dengan counter yang aman
 function _showLoading() {
-  _loadingCount++;
+  if (_isDestroyed) return;
+  _loadingCounter++;
   if (_loadingTimer) clearTimeout(_loadingTimer);
   const spinner = document.getElementById('navbarLoadingSpinner');
-  if (spinner) {
+  if (spinner && spinner.style.display !== 'block') {
     spinner.style.display = 'block';
     const video = spinner.querySelector('video');
     if (video && video.paused) video.play().catch(() => {});
@@ -77,16 +106,30 @@ function _showLoading() {
 }
 
 function _hideLoading() {
-  _loadingCount = Math.max(0, _loadingCount - 1);
-  if (_loadingCount === 0) {
+  if (_isDestroyed) return;
+  _loadingCounter = Math.max(0, _loadingCounter - 1);
+  if (_loadingCounter === 0) {
     _loadingTimer = setTimeout(() => {
-      const spinner = document.getElementById('navbarLoadingSpinner');
-      if (spinner) {
-        spinner.style.display = 'none';
-        const video = spinner.querySelector('video');
-        if (video) video.pause();
+      if (_loadingCounter === 0 && !_isDestroyed) {
+        const spinner = document.getElementById('navbarLoadingSpinner');
+        if (spinner && spinner.style.display === 'block') {
+          spinner.style.display = 'none';
+          const video = spinner.querySelector('video');
+          if (video) video.pause();
+        }
       }
     }, 200);
+  }
+}
+
+function _showLoadingForceHide() {
+  _loadingCounter = 0;
+  if (_loadingTimer) clearTimeout(_loadingTimer);
+  const spinner = document.getElementById('navbarLoadingSpinner');
+  if (spinner) {
+    spinner.style.display = 'none';
+    const video = spinner.querySelector('video');
+    if (video) video.pause();
   }
 }
 
@@ -96,7 +139,16 @@ function _scheduleIdleOrTimeout(cb, timeout = 1000) {
 }
 
 export const DB = {
+  // FIX: Destroy method untuk cleanup
+  destroy() {
+    _isDestroyed = true;
+    abortAllRequests();
+    _showLoadingForceHide();
+    console.log('[DB] Destroyed');
+  },
+
   async getAllBulk(sheets) {
+    if (_isDestroyed) throw new Error('DB service destroyed');
     if (!sheets || sheets.length === 0) return {};
     
     const key = 'bulk::' + sheets.join(',');
@@ -162,6 +214,7 @@ export const DB = {
   },
 
   async getAll(sheet, opts = {}) {
+    if (_isDestroyed) throw new Error('DB service destroyed');
     const key       = AppCache.buildKey(sheet, opts);
     const isPriority = AppCache.isPrioritySheet(sheet);
 
@@ -205,7 +258,7 @@ export const DB = {
   },
 
   async getById(sheet, id) {
-    if (!id) return null;
+    if (_isDestroyed || !id) return null;
     const key       = sheet + '::id::' + id;
     const isPriority = AppCache.isPrioritySheet(sheet);
     if (AppCache.isValid(key, sheet, false)) return AppCache.get(key);
@@ -222,6 +275,7 @@ export const DB = {
   },
 
   async getCount(sheet) {
+    if (_isDestroyed) return 0;
     const key       = sheet + '::count';
     const isPriority = AppCache.isPrioritySheet(sheet);
     if (AppCache.isValid(key, sheet, false)) return AppCache.get(key);
@@ -238,6 +292,7 @@ export const DB = {
   },
 
   async getCounts(sheets) {
+    if (_isDestroyed) return {};
     const key = 'counts::' + sheets.join(',');
     if (AppCache.isValid(key, 'default')) return AppCache.get(key);
     _showLoading();
@@ -249,7 +304,7 @@ export const DB = {
   },
 
   async getProjectSummary(projectId) {
-    if (!projectId) return { jsa_count: 0, wm_count: 0, po_count: 0, mp_count: 0, operational_count: 0, total_po: 0, total_operational: 0 };
+    if (_isDestroyed || !projectId) return { jsa_count: 0, wm_count: 0, po_count: 0, mp_count: 0, operational_count: 0, total_po: 0, total_operational: 0 };
     const key = 'summary::' + projectId;
     if (AppCache.isValid(key, 'default')) return AppCache.get(key);
     _showLoading();
@@ -261,6 +316,7 @@ export const DB = {
   },
 
   async getStats() {
+    if (_isDestroyed) return {};
     const key = 'dashboard_stats';
     if (AppCache.isValid(key, 'default')) return AppCache.get(key);
     _showLoading();
@@ -272,6 +328,7 @@ export const DB = {
   },
 
   async getRecent(sheet, limit = 5) {
+    if (_isDestroyed) return [];
     const key = sheet + '::recent::' + limit;
     if (AppCache.isValid(key, sheet)) return AppCache.get(key);
     _showLoading();
@@ -284,6 +341,7 @@ export const DB = {
   },
 
   async upsert(sheet, data) {
+    if (_isDestroyed) throw new Error('DB service destroyed');
     const key      = AppCache.buildKey(sheet);
     const cached   = AppCache.get(key);
     const oldCache = cached ? { ...cached, rows: [...(cached.rows || [])] } : null;
@@ -310,6 +368,7 @@ export const DB = {
   },
 
   async delete(sheet, id) {
+    if (_isDestroyed) return false;
     const key      = AppCache.buildKey(sheet);
     const cached   = AppCache.get(key);
     const oldCache = cached ? { ...cached, rows: [...(cached.rows || [])] } : null;
@@ -336,6 +395,7 @@ export const DB = {
   },
 
   async deleteWhere(sheet, field, value) {
+    if (_isDestroyed) return 0;
     const isPriority = AppCache.isPrioritySheet(sheet);
     _showLoading();
     try {
@@ -349,40 +409,73 @@ export const DB = {
     } finally { _hideLoading(); }
   },
 
+  // FIX: batchUpsert dengan chunking yang aman dan retry logic yang lebih baik
   async batchUpsert(operations) {
+    if (_isDestroyed) throw new Error('DB service destroyed');
+    if (!operations || operations.length === 0) return [];
+    
     const affected = {};
     operations.forEach(op => {
       if (!op.sheet || !op.data) return;
       if (!affected[op.sheet]) affected[op.sheet] = new Set();
       if (op.data.project_id) affected[op.sheet].add(op.data.project_id);
     });
+    
     _showLoading();
     try {
       let allResults = [];
-      if (operations.length > MAX_BATCH_SIZE) {
-        const chunks = [];
-        for (let i = 0; i < operations.length; i += MAX_BATCH_SIZE) {
-          chunks.push(operations.slice(i, i + MAX_BATCH_SIZE));
-        }
-        for (let i = 0; i < chunks.length; i++) {
+      
+      // Split menjadi chunks
+      const chunks = [];
+      for (let i = 0; i < operations.length; i += MAX_BATCH_SIZE) {
+        chunks.push(operations.slice(i, i + MAX_BATCH_SIZE));
+      }
+      
+      // Proses chunks dengan delay antar chunk untuk mencegah overload
+      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+        const chunk = chunks[chunkIndex];
+        let chunkSuccess = false;
+        let retryCount = 0;
+        const MAX_RETRIES = 2;
+        
+        while (!chunkSuccess && retryCount <= MAX_RETRIES && !_isDestroyed) {
           try {
-            const r = await _post({ action: 'batchUpsert', operations: chunks[i] }, BATCH_TIMEOUT);
+            const r = await _post({ action: 'batchUpsert', operations: chunk }, BATCH_TIMEOUT);
             allResults = allResults.concat(r.rows || []);
+            chunkSuccess = true;
           } catch (err) {
-            console.error(`[DB] Chunk ${i + 1} failed:`, err.message);
-            for (const op of chunks[i]) {
-              try {
-                const singleResult = await this.upsert(op.sheet, op.data);
-                if (singleResult) allResults.push(singleResult);
-              } catch (se) { console.error('[DB] Individual upsert failed:', se.message); }
+            retryCount++;
+            console.error(`[DB] Batch chunk ${chunkIndex + 1} attempt ${retryCount} failed:`, err.message);
+            
+            if (retryCount > MAX_RETRIES) {
+              // Fallback: simpan satu per satu untuk chunk ini
+              console.warn(`[DB] Falling back to individual upsert for chunk ${chunkIndex + 1}`);
+              for (const op of chunk) {
+                try {
+                  const singleResult = await this.upsert(op.sheet, op.data);
+                  if (singleResult) allResults.push(singleResult);
+                  // Delay kecil antar individual upsert
+                  await new Promise(r => setTimeout(r, 100));
+                } catch (se) { 
+                  console.error('[DB] Individual upsert failed:', se.message);
+                }
+              }
+              chunkSuccess = true;
+            } else {
+              // Exponential backoff sebelum retry
+              const waitTime = 1000 * Math.pow(2, retryCount - 1);
+              await new Promise(r => setTimeout(r, waitTime));
             }
           }
         }
-      } else {
-        const r = await _post({ action: 'batchUpsert', operations }, BATCH_TIMEOUT);
-        allResults = r.rows || [];
+        
+        // Delay antar chunks untuk mencegah rate limiting
+        if (chunkIndex < chunks.length - 1) {
+          await new Promise(r => setTimeout(r, 500));
+        }
       }
       
+      // Invalidate cache setelah semua selesai
       Object.entries(affected).forEach(([sheet, projectIds]) => {
         AppCache.invalidateSheetOnly(sheet);
         projectIds.forEach(pid => {
@@ -393,11 +486,15 @@ export const DB = {
         });
         if (AppCache.isPrioritySheet(sheet)) _scheduleIdleOrTimeout(() => AppCache.refreshStale(sheet), 500);
       });
+      
       return allResults;
-    } finally { _hideLoading(); }
+    } finally { 
+      _hideLoading(); 
+    }
   },
 
   async batchDelete(operations) {
+    if (_isDestroyed) return 0;
     const affected = {};
     operations.forEach(op => {
       if (!op.sheet) return;
@@ -419,12 +516,14 @@ export const DB = {
   },
 
   async initSheets() {
+    if (_isDestroyed) return null;
     _showLoading();
     try { return await _post({ action: 'initSheets' }); }
     finally { _hideLoading(); }
   },
 
   async post(body) {
+    if (_isDestroyed) throw new Error('DB service destroyed');
     _showLoading();
     try { return await _post(body); }
     finally { _hideLoading(); }
@@ -484,12 +583,13 @@ export const DataAccess = {
   async deleteProject(id)        {
     if (!id) return false;
     _showLoading();
-    try { await _post({ action: 'deleteProject', projectId: id }); }
-    finally { _hideLoading(); }
-    AppCache.invalidateRelated('projects', { projectId: id });
-    StorageService.invalidateCache('projects');
-    StorageService.addAuditLog('DELETE_PROJECT', `Proyek ${id} beserta data terkait dihapus`);
-    return true;
+    try { 
+      const r = await _post({ action: 'deleteProject', projectId: id });
+      AppCache.invalidateRelated('projects', { projectId: id });
+      StorageService.invalidateCache('projects');
+      StorageService.addAuditLog('DELETE_PROJECT', `Proyek ${id} beserta data terkait dihapus`);
+      return r.deleted;
+    } finally { _hideLoading(); }
   },
 
   async getAllJSA()               { return StorageService.getData('jsa'); },
@@ -555,9 +655,6 @@ export const DataAccess = {
   },
   async deletePO(id)             { if (!id) return false; await DB.delete('procurement', id); StorageService.invalidateCache('procurement'); return true; },
 
-  // ============================================================
-  // OPERATIONAL COST METHODS (BARU)
-  // ============================================================
   async getAllOperational()          { return StorageService.getData('operational'); },
   async getOperationalById(id)       { return id ? DB.getById('operational', id) : null; },
   async getOperationalByProject(pid) { 

@@ -1,4 +1,5 @@
-// cache.js — ES6 Module v3.0 - Optimized with Better TTL, Memory Management & Stale-While-Revalidate
+// cache.js — ES6 Module v4.0 - FIXED: Deadlock prevention, memory leak fix, request timeout
+// Perbaikan prioritas tertinggi: deadlock, memory leak, pending promise stuck
 
 const _cache            = new Map();
 const _cacheTimestamps  = new Map();
@@ -7,52 +8,53 @@ const _pending          = new Map();
 const _requestQueue     = [];
 let   _processingQueue  = false;
 
-const MAX_CACHE_SIZE = 800;        // ↑ dari 500
-const MAX_CACHE_AGE  = 4 * 60 * 60 * 1000; // 4 jam (↑ dari 2 jam)
+const MAX_CACHE_SIZE = 800;
+const MAX_CACHE_AGE  = 4 * 60 * 60 * 1000; // 4 jam
+const PENDING_TIMEOUT_MS = 30 * 1000; // 30 detik timeout untuk pending promise
 
 // Priority sheets with optimized TTL and preload settings
 const PRIORITY_SHEETS = Object.freeze({
-  company:      { ttl: 8 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },  // 8 jam
-  accounts:     { ttl: 8 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },  // 8 jam
-  personnel:    { ttl: 4 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },  // 4 jam
-  projects:     { ttl: 4 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },  // 4 jam
-  work_methods: { ttl: 2 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },  // 2 jam
-  jsa:          { ttl: 2 * 60 * 60 * 1000, preload: false, staleWhileRevalidate: true },  // 2 jam
-  jadwal:       { ttl: 1 * 60 * 60 * 1000, preload: false, staleWhileRevalidate: true },  // 1 jam
-  manpower:     { ttl: 1 * 60 * 60 * 1000, preload: false, staleWhileRevalidate: true },  // 1 jam
-  procurement:  { ttl: 15 * 60 * 1000,     preload: false, staleWhileRevalidate: true },  // 15 menit
-  operational:  { ttl: 15 * 60 * 1000,     preload: false, staleWhileRevalidate: true },  // 15 menit
+  company:      { ttl: 8 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },
+  accounts:     { ttl: 8 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },
+  personnel:    { ttl: 4 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },
+  projects:     { ttl: 4 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },
+  work_methods: { ttl: 2 * 60 * 60 * 1000, preload: true,  staleWhileRevalidate: true },
+  jsa:          { ttl: 2 * 60 * 60 * 1000, preload: false, staleWhileRevalidate: true },
+  jadwal:       { ttl: 1 * 60 * 60 * 1000, preload: false, staleWhileRevalidate: true },
+  manpower:     { ttl: 1 * 60 * 60 * 1000, preload: false, staleWhileRevalidate: true },
+  procurement:  { ttl: 15 * 60 * 1000,     preload: false, staleWhileRevalidate: true },
+  operational:  { ttl: 15 * 60 * 1000,     preload: false, staleWhileRevalidate: true },
 });
 
 const CACHE_TTL = Object.freeze({
-  company:        8 * 60 * 60 * 1000,  // 8 jam
-  accounts:       8 * 60 * 60 * 1000,  // 8 jam
-  personnel:      4 * 60 * 60 * 1000,  // 4 jam
-  projects:       4 * 60 * 60 * 1000,  // 4 jam
-  work_methods:   2 * 60 * 60 * 1000,  // 2 jam
-  jsa:            2 * 60 * 60 * 1000,  // 2 jam
-  manpower:       1 * 60 * 60 * 1000,  // 1 jam
-  procurement:    15 * 60 * 1000,      // 15 menit
-  operational:    15 * 60 * 1000,      // 15 menit
-  jadwal:         15 * 60 * 1000,      // 15 menit
-  dashboard_stats: 5 * 60 * 1000,      // 5 menit
-  project_summary: 2 * 60 * 1000,      // 2 menit
-  laporan:        5 * 60 * 1000,       // 5 menit
-  default:        10 * 60 * 1000,      // 10 menit
+  company:        8 * 60 * 60 * 1000,
+  accounts:       8 * 60 * 60 * 1000,
+  personnel:      4 * 60 * 60 * 1000,
+  projects:       4 * 60 * 60 * 1000,
+  work_methods:   2 * 60 * 60 * 1000,
+  jsa:            2 * 60 * 60 * 1000,
+  manpower:       1 * 60 * 60 * 1000,
+  procurement:    15 * 60 * 1000,
+  operational:    15 * 60 * 1000,
+  jadwal:         15 * 60 * 1000,
+  dashboard_stats: 5 * 60 * 1000,
+  project_summary: 2 * 60 * 1000,
+  laporan:        5 * 60 * 1000,
+  default:        10 * 60 * 1000,
 });
 
 const STALE_WINDOW = Object.freeze({
-  company:       12 * 60 * 60 * 1000,   // 12 jam
-  accounts:      12 * 60 * 60 * 1000,   // 12 jam
-  personnel:      6 * 60 * 60 * 1000,   // 6 jam
-  projects:       6 * 60 * 60 * 1000,   // 6 jam
-  work_methods:   4 * 60 * 60 * 1000,   // 4 jam
-  jsa:            4 * 60 * 60 * 1000,   // 4 jam
-  manpower:       2 * 60 * 60 * 1000,   // 2 jam
-  procurement:    1 * 60 * 60 * 1000,   // 1 jam
-  operational:    1 * 60 * 60 * 1000,   // 1 jam
-  jadwal:         1 * 60 * 60 * 1000,   // 1 jam
-  laporan:        1 * 60 * 60 * 1000,   // 1 jam
+  company:       12 * 60 * 60 * 1000,
+  accounts:      12 * 60 * 60 * 1000,
+  personnel:      6 * 60 * 60 * 1000,
+  projects:       6 * 60 * 60 * 1000,
+  work_methods:   4 * 60 * 60 * 1000,
+  jsa:            4 * 60 * 60 * 1000,
+  manpower:       2 * 60 * 60 * 1000,
+  procurement:    1 * 60 * 60 * 1000,
+  operational:    1 * 60 * 60 * 1000,
+  jadwal:         1 * 60 * 60 * 1000,
+  laporan:        1 * 60 * 60 * 1000,
 });
 
 const BG_REFRESH_THRESHOLD = Object.freeze({
@@ -69,7 +71,6 @@ const BG_REFRESH_THRESHOLD = Object.freeze({
   default:      0.70,
 });
 
-// Optimized dependency map for cascade invalidation
 const DEPENDENCY_MAP = Object.freeze({
   projects:     ['jsa', 'work_methods', 'manpower', 'procurement', 'operational', 'jadwal', 'project_summary', 'dashboard_stats'],
   work_methods: ['jsa', 'jadwal', 'project_summary'],
@@ -96,24 +97,41 @@ const REVERSE_DEPENDENCY_MAP = (() => {
 
 let _cleanupTimer = null;
 let _memoryPressureTimer = null;
+let _isDestroyed = false;
 
 export const AppCache = {
+  // ========== DESTROY METHOD UNTUK CLEANUP ==========
+  destroy() {
+    _isDestroyed = true;
+    if (_cleanupTimer) {
+      clearInterval(_cleanupTimer);
+      _cleanupTimer = null;
+    }
+    if (_memoryPressureTimer) {
+      clearInterval(_memoryPressureTimer);
+      _memoryPressureTimer = null;
+    }
+    this.clear();
+    console.log('[AppCache] Destroyed and cleaned up');
+  },
+
   _startPeriodicCleanup() {
-    if (_cleanupTimer) return;
+    if (_cleanupTimer || _isDestroyed) return;
     _cleanupTimer = setInterval(() => {
+      if (_isDestroyed) return;
       this._evictExpiredEntries();
       this._refreshStalePrioritySheets();
-    }, 15 * 60 * 1000); // 15 menit
+    }, 15 * 60 * 1000);
     
     window.addEventListener('beforeunload', () => {
-      if (_cleanupTimer) { clearInterval(_cleanupTimer); _cleanupTimer = null; }
-      if (_memoryPressureTimer) { clearInterval(_memoryPressureTimer); _memoryPressureTimer = null; }
+      this.destroy();
     });
     
     this._startMemoryPressureHandler();
   },
 
   async _refreshStalePrioritySheets() {
+    if (_isDestroyed) return;
     const prioritySheets = this.getPrioritySheets();
     for (const sheet of prioritySheets) {
       if (this.isStale(sheet, sheet) && this.isStaleWindowValid(sheet, sheet)) {
@@ -129,8 +147,9 @@ export const AppCache = {
   },
 
   _startMemoryPressureHandler() {
-    if (_memoryPressureTimer) return;
+    if (_memoryPressureTimer || _isDestroyed) return;
     _memoryPressureTimer = setInterval(() => {
+      if (_isDestroyed) return;
       if ('memory' in performance && performance.memory) {
         const { usedJSHeapSize, jsHeapSizeLimit } = performance.memory;
         const usagePercent = usedJSHeapSize / jsHeapSizeLimit;
@@ -147,10 +166,11 @@ export const AppCache = {
       } else if (_cache.size > MAX_CACHE_SIZE * 1.2) {
         this._evictOldestEntries(0.3);
       }
-    }, 60000); // Check setiap 60 detik
+    }, 60000);
   },
 
   _evictOldestEntries(percent) {
+    if (_isDestroyed) return;
     const entries = [..._cacheTimestamps.entries()]
       .sort((a, b) => a[1] - b[1]);
     const evictCount = Math.floor(entries.length * percent);
@@ -170,6 +190,7 @@ export const AppCache = {
   },
 
   _evictExpiredEntries() {
+    if (_isDestroyed) return;
     const now = Date.now();
     const toDelete = [];
     _cacheTimestamps.forEach((ts, key) => {
@@ -185,6 +206,7 @@ export const AppCache = {
   },
 
   _enforceMaxSize() {
+    if (_isDestroyed) return;
     if (_cache.size <= MAX_CACHE_SIZE) return;
     const entries = [..._cacheTimestamps.entries()].sort((a, b) => a[1] - b[1]);
     const evictCount = _cache.size - MAX_CACHE_SIZE;
@@ -274,6 +296,7 @@ export const AppCache = {
   },
 
   invalidateByDependency(dependency) {
+    if (_isDestroyed) return 0;
     let count = 0;
     const toDelete = [];
     _cacheMeta.forEach((meta, key) => {
@@ -301,6 +324,7 @@ export const AppCache = {
   },
 
   invalidate(sheet, options = {}) {
+    if (_isDestroyed) return 0;
     let count = 0;
     if (options.projectId)  count += this.invalidateByDependency(`projects:${options.projectId}`);
     else if (options.entityId) count += this.invalidateByDependency(`${sheet}:${options.entityId}`);
@@ -315,6 +339,7 @@ export const AppCache = {
   },
 
   invalidateRelated(sheet, options = {}) {
+    if (_isDestroyed) return 0;
     this.invalidate(sheet, options);
     const statsSheets = ['jsa', 'work_methods', 'manpower', 'procurement', 'operational', 'jadwal', 'projects', 'company'];
     if (statsSheets.includes(sheet)) {
@@ -329,6 +354,7 @@ export const AppCache = {
   },
 
   invalidateSheetOnly(sheet) {
+    if (_isDestroyed) return 0;
     let count = 0;
     const toDelete = [];
     _cache.forEach((_, key) => { if (key === sheet || key.startsWith(sheet + '::')) toDelete.push(key); });
@@ -342,6 +368,7 @@ export const AppCache = {
   },
 
   invalidateWithLimit(sheet, options = {}, maxKeys = 20) {
+    if (_isDestroyed) return 0;
     let count = 0;
     const toDelete = [];
     _cacheMeta.forEach((meta, key) => {
@@ -364,12 +391,48 @@ export const AppCache = {
     _cache.clear();
     _cacheTimestamps.clear();
     _cacheMeta.clear();
-    _pending.clear();
+    // JANGAN clear _pending di sini — biar pending promise tetap bisa resolve
   },
 
-  getPending(key)           { return _pending.get(key) || null; },
-  setPending(key, promise)  { _pending.set(key, promise); },
-  deletePending(key)        { _pending.delete(key); },
+  // ========== FIX: PENDING PROMISE DENGAN TIMEOUT ==========
+  getPending(key) { 
+    const pending = _pending.get(key);
+    if (pending && pending._timeoutId) {
+      // Cek apakah promise sudah timeout
+      if (pending._timedOut) {
+        _pending.delete(key);
+        return null;
+      }
+    }
+    return pending ? pending.promise : null; 
+  },
+  
+  setPending(key, promise) {
+    // Hapus pending lama jika ada
+    const existing = _pending.get(key);
+    if (existing && existing._timeoutId) {
+      clearTimeout(existing._timeoutId);
+    }
+    
+    const timeoutId = setTimeout(() => {
+      const p = _pending.get(key);
+      if (p && p.promise === promise) {
+        console.warn(`[AppCache] Pending promise timeout for key: ${key}`);
+        p._timedOut = true;
+        _pending.delete(key);
+      }
+    }, PENDING_TIMEOUT_MS);
+    
+    _pending.set(key, { promise, _timeoutId: timeoutId, _timedOut: false });
+  },
+  
+  deletePending(key) {
+    const existing = _pending.get(key);
+    if (existing && existing._timeoutId) {
+      clearTimeout(existing._timeoutId);
+    }
+    _pending.delete(key);
+  },
 
   getStats() {
     const bySheet = {};
@@ -437,6 +500,7 @@ export const AppCache = {
   },
 
   async warmup(sheets = null) {
+    if (_isDestroyed) return;
     const sheetsToWarm = sheets || this.getPrioritySheets();
     console.log(`[AppCache] Warming up ${sheetsToWarm.length} sheets:`, sheetsToWarm);
     await Promise.allSettled(sheetsToWarm.map(async (sheet) => {
@@ -453,7 +517,7 @@ export const AppCache = {
   },
 
   async warmupBulk(sheets) {
-    if (!sheets || sheets.length === 0) return;
+    if (_isDestroyed || !sheets || sheets.length === 0) return;
     console.log(`[AppCache] Bulk warming up ${sheets.length} sheets:`, sheets);
     try {
       const { DB } = await import('./db.js');
@@ -465,6 +529,7 @@ export const AppCache = {
   },
 
   async warmupCritical() {
+    if (_isDestroyed) return;
     const criticalSheets = ['company', 'projects', 'accounts'];
     console.log('[AppCache] Warming up critical sheets:', criticalSheets);
     const startTime = performance.now();
@@ -479,7 +544,7 @@ export const AppCache = {
   },
 
   async refreshStale(sheet) {
-    if (!this.hasStaleSupport(sheet)) return;
+    if (_isDestroyed || !this.hasStaleSupport(sheet)) return;
     if (this.isStale(sheet, sheet) && this.isStaleWindowValid(sheet, sheet)) {
       try {
         const { DB } = await import('./db.js');
@@ -501,33 +566,47 @@ export const AppCache = {
     return ts ? Math.round((Date.now() - ts) / 1000) : null;
   },
 
-  // Queue mechanism for concurrent requests
+  // ========== FIX: QUEUE DENGAN TIMEOUT DAN MAX CONCURRENT ==========
   enqueueRequest(fn) {
     return new Promise((resolve, reject) => {
-      _requestQueue.push({ resolve, reject, fn });
+      const timeoutId = setTimeout(() => {
+        const index = _requestQueue.findIndex(item => item.timeoutId === timeoutId);
+        if (index !== -1) {
+          _requestQueue.splice(index, 1);
+          reject(new Error('Request queue timeout after 60 seconds'));
+        }
+      }, 60000);
+      
+      _requestQueue.push({ resolve, reject, fn, timeoutId });
       this._processQueue();
     });
   },
 
   async _processQueue() {
-    if (_processingQueue) return;
+    if (_processingQueue || _isDestroyed) return;
     _processingQueue = true;
     
-    const maxConcurrent = 4;
+    const maxConcurrent = 3; // Turunkan dari 4 ke 3 untuk safety
     let activeCount = 0;
     
     const processNext = async () => {
-      while (_requestQueue.length > 0 && activeCount < maxConcurrent) {
-        const { resolve, reject, fn } = _requestQueue.shift();
+      while (_requestQueue.length > 0 && activeCount < maxConcurrent && !_isDestroyed) {
+        const item = _requestQueue.shift();
+        if (!item) continue;
+        
+        // Clear timeout jika masih ada
+        if (item.timeoutId) clearTimeout(item.timeoutId);
+        
         activeCount++;
         try {
-          const result = await fn();
-          resolve(result);
+          const result = await item.fn();
+          item.resolve(result);
         } catch (err) {
-          reject(err);
+          item.reject(err);
         } finally {
           activeCount--;
-          processNext();
+          // Lanjutkan proses setelah delay kecil untuk memberi waktu event loop
+          setTimeout(() => processNext(), 10);
         }
       }
     };

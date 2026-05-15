@@ -1,7 +1,7 @@
-// main.js — ES6 Module v4.4 — Full Module Entry Point with Data Prefetching & Auto-Warmup
+// main.js — ES6 Module v5.0 — FIXED: Event listener cleanup, memory leak prevention, page lifecycle management
 import { ROUTES, ROUTES_NEED_COMPANY, ROUTES_NEED_PROJECT, EL, ERR, TOAST } from './constants.js';
 import { AppCache } from './cache.js';
-import { DB, DataAccess } from './db.js';
+import { DB, DataAccess, abortAllRequests } from './db.js';
 import { AppError } from './error-handler.js';
 import { AuthService, AppNavbar, LoginPage, ROLES } from './login.js';
 
@@ -110,7 +110,13 @@ export const UtilityService = {
   },
   showConfirmDialog(message, onConfirm, onCancel) {
     const existing = document.getElementById('confirmDialog');
-    if (existing) { const m = bootstrap.Modal.getInstance(existing); if (m) m.dispose(); existing.remove(); }
+    if (existing) { 
+      try {
+        const m = bootstrap.Modal.getInstance(existing); 
+        if (m) m.dispose(); 
+      } catch(e) {}
+      existing.remove(); 
+    }
     const wrapper = document.createElement('div');
     wrapper.innerHTML = `<div class="modal fade" id="confirmDialog" tabindex="-1" role="dialog" aria-modal="true">
       <div class="modal-dialog modal-dialog-centered" role="document">
@@ -131,15 +137,60 @@ export const UtilityService = {
     document.getElementById('confirmDialogMsg').textContent = message;
     const modalEl = document.getElementById('confirmDialog');
     const modal   = new bootstrap.Modal(modalEl);
-    const cleanup = () => { modalEl.remove(); document.getElementById('confirmOkBtn')?.removeEventListener('click', handleConfirm); document.getElementById('confirmCancelBtn')?.removeEventListener('click', handleCancel); };
-    const handleConfirm = () => { modal.hide(); if (onConfirm) onConfirm(); modalEl.removeEventListener('hidden.bs.modal', cleanup); };
-    const handleCancel  = () => { modal.hide(); if (onCancel) onCancel(); modalEl.removeEventListener('hidden.bs.modal', cleanup); };
+    let isResolved = false;
+    const cleanup = () => { 
+      if (isResolved) return;
+      isResolved = true;
+      try { modalEl.remove(); } catch(e) {}
+      document.getElementById('confirmOkBtn')?.removeEventListener('click', handleConfirm); 
+      document.getElementById('confirmCancelBtn')?.removeEventListener('click', handleCancel);
+      modalEl?.removeEventListener('hidden.bs.modal', cleanup);
+    };
+    const handleConfirm = () => { 
+      modal.hide(); 
+      if (onConfirm && !isResolved) onConfirm(); 
+      cleanup();
+    };
+    const handleCancel = () => { 
+      modal.hide(); 
+      if (onCancel && !isResolved) onCancel(); 
+      cleanup();
+    };
     document.getElementById('confirmOkBtn').addEventListener('click', handleConfirm);
     document.getElementById('confirmCancelBtn').addEventListener('click', handleCancel);
     modalEl.addEventListener('hidden.bs.modal', cleanup);
     modal.show();
   }
 };
+
+// ─────────────────────────────────────────────
+// Page lifecycle management
+// ─────────────────────────────────────────────
+let _currentPageInstance = null;
+let _currentPageName = null;
+
+function _cleanupCurrentPage() {
+  if (_currentPageInstance && typeof _currentPageInstance.destroy === 'function') {
+    try {
+      _currentPageInstance.destroy();
+      console.log(`[UIService] Destroyed page: ${_currentPageName}`);
+    } catch (err) {
+      console.warn(`[UIService] Error destroying page ${_currentPageName}:`, err);
+    }
+  }
+  
+  // Cleanup global page references
+  const globalPages = ['DashboardPage', 'CompanyPage', 'ProjectPage', 'WorkMethodPage', 
+    'JSAPage', 'SchedulePage', 'ManpowerPage', 'ProcurementPage', 'ReportPage'];
+  globalPages.forEach(pageName => {
+    if (window[pageName]) {
+      delete window[pageName];
+    }
+  });
+  
+  _currentPageInstance = null;
+  _currentPageName = null;
+}
 
 // ─────────────────────────────────────────────
 // Data prefetch mapping untuk setiap halaman
@@ -210,12 +261,24 @@ function _evictLRUModules() {
 // ─────────────────────────────────────────────
 export const UIService = {
   currentRoute:    null,
-  _guardCache:     { companyOk: null, hasProjects: null },
+  _guardCache:     { companyOk: null, hasProjects: null, timestamp: 0 },
   _loadingRoute:   null,
   _prefetchTimers: new Set(),
   _toastContainer: null,
+  _isDestroyed:    false,
 
-  invalidateGuardCache() { this._guardCache = { companyOk: null, hasProjects: null }; },
+  invalidateGuardCache() { this._guardCache = { companyOk: null, hasProjects: null, timestamp: 0 }; },
+
+  destroy() {
+    this._isDestroyed = true;
+    this._cleanupPrefetchTimers();
+    if (this._toastContainer) {
+      this._toastContainer.remove();
+      this._toastContainer = null;
+    }
+    _cleanupCurrentPage();
+    console.log('[UIService] Destroyed');
+  },
 
   init() { this.setupRouting(); },
 
@@ -243,11 +306,15 @@ export const UIService = {
 
   setupRouting() {
     const handleHash = PerformanceUtils.debounce(() => {
+      if (this._isDestroyed) return;
       const hash = window.location.hash.replace('#','') || ROUTES.DASHBOARD;
       this.navigate(hash);
     }, 100);
     window.addEventListener('hashchange', handleHash);
-    window.addEventListener('beforeunload', () => { window.removeEventListener('hashchange', handleHash); this._cleanupPrefetchTimers(); });
+    window.addEventListener('beforeunload', () => { 
+      window.removeEventListener('hashchange', handleHash);
+      this.destroy();
+    });
     if (window.location.hash) this.navigate(window.location.hash.replace('#','') || ROUTES.DASHBOARD);
     else window.location.hash = '#' + ROUTES.DASHBOARD;
   },
@@ -258,8 +325,13 @@ export const UIService = {
   },
 
   navigate(route) {
+    if (this._isDestroyed) return;
     if (document.getElementById(EL.LOGIN_CONTAINER)?.style.display === 'flex') return;
     if (this._loadingRoute === route) return;
+    
+    // Cleanup previous page before loading new one
+    _cleanupCurrentPage();
+    
     this.currentRoute = route;
     document.querySelectorAll('.nav-item[data-route]').forEach(n => n.classList.toggle('active', n.dataset.route === route));
     this.loadPage(route);
@@ -278,6 +350,8 @@ export const UIService = {
   },
 
   async loadPage(route) {
+    if (this._isDestroyed) return;
+    
     const mainContent = document.getElementById('appMainContent');
     if (!mainContent) return;
     this._loadingRoute = route;
@@ -296,13 +370,13 @@ export const UIService = {
     }
 
     const GUARD_CACHE_TTL = 5 * 60 * 1000;
-    const guardCacheKey = `guard_${route}`;
-    const shouldRefresh = Date.now() - (this._guardCache[guardCacheKey]?.timestamp || 0) > GUARD_CACHE_TTL;
+    const now = Date.now();
+    const shouldRefresh = now - (this._guardCache.timestamp || 0) > GUARD_CACHE_TTL;
 
     if (ROUTES_NEED_COMPANY.includes(route)) {
-      if (!this._guardCache.companyOk || shouldRefresh) {
+      if (this._guardCache.companyOk === null || shouldRefresh) {
         this._guardCache.companyOk = await DataAccess.isCompanyComplete();
-        this._guardCache[guardCacheKey] = { timestamp: Date.now() };
+        this._guardCache.timestamp = now;
       }
       if (!this._guardCache.companyOk) {
         mainContent.innerHTML = this.showFlowBanner('bi-building-exclamation','Lengkapi Data Perusahaan Terlebih Dahulu',ERR.COMPANY_INCOMPLETE,'<i class="bi bi-building"></i> Isi Data Perusahaan',`UIService.navigate('${ROUTES.PERUSAHAAN}')`);
@@ -311,9 +385,9 @@ export const UIService = {
     }
 
     if (ROUTES_NEED_PROJECT.includes(route)) {
-      if (!this._guardCache.hasProjects || shouldRefresh) {
+      if (this._guardCache.hasProjects === null || shouldRefresh) {
         this._guardCache.hasProjects = await DataAccess.hasProjects();
-        this._guardCache[guardCacheKey] = { timestamp: Date.now() };
+        this._guardCache.timestamp = now;
       }
       if (!this._guardCache.hasProjects) {
         mainContent.innerHTML = this.showFlowBanner('bi-clipboard-plus','Buat Proyek Terlebih Dahulu',ERR.NO_PROJECT,'<i class="bi bi-clipboard-data"></i> Buat Proyek Baru',`UIService.navigate('${ROUTES.PROYEK}')`);
@@ -356,6 +430,11 @@ export const UIService = {
 
       const page = this._getPageFromModule(module, route);
       if (!page || typeof page.render !== 'function') throw new Error(`Module "${route}" tidak memiliki page object yang valid`);
+      
+      // Simpan instance untuk cleanup nanti
+      _currentPageInstance = page;
+      _currentPageName = route;
+      
       this._exposeToGlobal(route, page);
 
       await new Promise(resolve => {
@@ -420,12 +499,15 @@ export const UIService = {
   },
 
   _prefetchRelatedPages(route) {
+    if (this._isDestroyed) return;
+    
     (PREFETCH_MAP[route] || []).forEach(targetRoute => {
-      // ===== MODULE PREFETCH (existing) =====
+      // Module prefetch
       if (!_loadedModules.has(targetRoute)) {
         const loader = PAGE_LOADERS[targetRoute];
         if (loader) {
           const timer = PerformanceUtils.scheduleIdleTask(() => {
+            if (this._isDestroyed) return;
             loader().then(module => {
               _evictLRUModules();
               _loadedModules.set(targetRoute, module);
@@ -438,17 +520,18 @@ export const UIService = {
         }
       }
       
-      // ===== 🆕 DATA PREFETCH — Prefetch data untuk halaman yang mungkin diakses =====
+      // Data prefetch
       const dataSheets = PAGE_DATA_MAP[targetRoute];
       if (dataSheets && dataSheets.length > 0) {
         const dataTimer = PerformanceUtils.scheduleIdleTask(() => {
+          if (this._isDestroyed) return;
           console.debug(`[UIService] 📦 Prefetching DATA for route: ${targetRoute} — sheets: [${dataSheets.join(', ')}]`);
           import('./db.js').then(({ DB }) => {
             DB.getAllBulk(dataSheets).catch(err => {
               console.warn(`[UIService] ⚠️ Prefetch data failed for ${targetRoute}:`, err.message);
             });
           });
-        }, 3000); // Delay 3 detik setelah halaman utama selesai render
+        }, 3000);
         this._prefetchTimers.add(dataTimer);
       }
     });
@@ -471,18 +554,17 @@ export const AppAuth = {
     window.location.hash = '#' + defaultRoute;
     UIService.navigate(defaultRoute);
     
-    // 🆕 Auto-warmup cache setelah login
+    // Cache warmup after login
     setTimeout(async () => {
       try {
         console.log('[AppAuth] 🔥 Starting cache warmup after login...');
         const prioritySheets = AppCache.getPrioritySheets();
-        console.log('[AppAuth] Warming up priority sheets:', prioritySheets);
         await AppCache.warmupBulk(prioritySheets);
         console.log('[AppAuth] ✅ Cache warmup complete');
       } catch (err) {
         console.warn('[AppAuth] ⚠️ Cache warmup failed:', err.message);
       }
-    }, 300); // Delay 300ms setelah navigasi
+    }, 500);
   },
 
   applyRoleToUI(role) {
@@ -520,19 +602,28 @@ export const AppAuth = {
   logout() {
     UtilityService.showConfirmDialog('Apakah Anda yakin ingin keluar?', () => {
       this.restoreNavigate();
-      if (this._accountTableHandler) {
-        document.getElementById('accountTableBody')?.removeEventListener('click', this._accountTableHandler);
-        this._accountTableHandler = null;
-      }
+      this._cleanupAccountTableHandler();
+      // Cleanup all services
+      abortAllRequests();
+      AppCache.destroy();
+      UIService.destroy();
       AuthService.logout();
     });
   },
-
-  async renderAccountManager() {
+  
+  _cleanupAccountTableHandler() {
     if (this._accountTableHandler) {
-      document.getElementById('accountTableBody')?.removeEventListener('click', this._accountTableHandler);
+      const tbody = document.getElementById('accountTableBody');
+      if (tbody) {
+        tbody.removeEventListener('click', this._accountTableHandler);
+      }
       this._accountTableHandler = null;
     }
+  },
+
+  async renderAccountManager() {
+    this._cleanupAccountTableHandler();
+    
     let accounts = [];
     try { accounts = await DataAccess.getAccounts(); }
     catch (err) { console.error('[AppAuth] Gagal memuat akun:', err); }
@@ -695,10 +786,14 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 window.addEventListener('beforeunload', () => {
-  if (UIService._toastContainer) { UIService._toastContainer.remove(); UIService._toastContainer = null; }
-  UtilityService._docNumberCache.clear();
-  UIService._cleanupPrefetchTimers();
+  abortAllRequests();
+  AppCache.destroy();
+  UIService.destroy();
   AppNavbar.destroy();
   AppAuth.restoreNavigate();
-  if (LoginPage._loginContainer) { LoginPage._loginContainer.remove(); LoginPage._loginContainer = null; }
+  if (LoginPage._loginContainer) { 
+    LoginPage._loginContainer.remove(); 
+    LoginPage._loginContainer = null; 
+  }
+  UtilityService._docNumberCache.clear();
 });

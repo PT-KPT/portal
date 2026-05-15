@@ -1,14 +1,19 @@
-// jadwal.js — ES6 Module — Jadwal Kerja v3.1
+// jadwal.js — ES6 Module — Jadwal Kerja v4.0 - FIXED: DOM overflow, infinite loop, memory leak
 import { ROUTES, TOAST, SHEETS } from './constants.js';
-import { DataAccess } from './db.js';
+import { DB, DataAccess } from './db.js';
 import { AppError } from './error-handler.js';
 import { UtilityService, UIService } from './main.js';
 
 const SchedulePage = {
   _currentProjectId: null,
   _cachedProjects:   [],
-  _scheduleRows:     [],   // rows dari sheet jadwal untuk proyek aktif
-  _workMethodMap:    {},   // { wmId: { document_number, work_steps[] } }
+  _scheduleRows:     [],
+  _workMethodMap:    {},
+  _isSaving:         false,
+  _saveTimeout:      null,
+  _eventListeners:   [], // Track listeners for cleanup
+  _abortController:  null,
+  _isDestroyed:      false,
 
   render() {
     return `
@@ -39,8 +44,39 @@ const SchedulePage = {
     </div>`;
   },
 
+  // ========== DESTROY METHOD UNTUK CLEANUP ==========
+  destroy() {
+    this._isDestroyed = true;
+    this._cleanupEventListeners();
+    if (this._saveTimeout) clearTimeout(this._saveTimeout);
+    if (this._abortController) {
+      this._abortController.abort();
+      this._abortController = null;
+    }
+    this._scheduleRows = [];
+    this._workMethodMap = {};
+    console.log('[SchedulePage] Destroyed');
+  },
+
+  _cleanupEventListeners() {
+    this._eventListeners.forEach(({ element, event, handler }) => {
+      if (element && element.removeEventListener) {
+        element.removeEventListener(event, handler);
+      }
+    });
+    this._eventListeners = [];
+  },
+
+  _addEventListener(element, event, handler) {
+    if (!element) return;
+    element.addEventListener(event, handler);
+    this._eventListeners.push({ element, event, handler });
+  },
+
   /* ──────────────────── INIT ──────────────────── */
   async init() {
+    if (this._isDestroyed) return;
+    
     this._cachedProjects  = await DataAccess.getAllProjects();
     this._currentProjectId = null;
     this._scheduleRows    = [];
@@ -63,6 +99,14 @@ const SchedulePage = {
 
   /* ──────────────────── PROJECT CHANGE ──────────────────── */
   async onProjectChange() {
+    if (this._isDestroyed) return;
+    
+    // Cancel pending save
+    if (this._saveTimeout) {
+      clearTimeout(this._saveTimeout);
+      this._saveTimeout = null;
+    }
+    
     const projectId = document.getElementById('selectScheduleProject')?.value;
     this._currentProjectId = projectId;
 
@@ -80,41 +124,65 @@ const SchedulePage = {
       return;
     }
 
+    // Show skeleton loading
     content.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-state__icon"><i class="bi bi-hourglass-split"></i></div>
-        <p>Memuat data jadwal…</p>
+      <div class="skeleton-loading">
+        <div class="text-center mb-4">
+          <div class="page-loading-spinner" style="margin:0 auto 1rem;"></div>
+          <h5 style="color:#64748b;"><i class="bi bi-calendar-week"></i> Memuat Jadwal...</h5>
+        </div>
+        <div class="skeleton-card">
+          <div class="skeleton-line w-75"></div>
+          <div class="skeleton-line w-50"></div>
+          <div class="skeleton-line w-100"></div>
+          <div class="skeleton-line w-100"></div>
+        </div>
       </div>`;
 
     try {
-      // Muat work_methods dan jadwal secara paralel
-      const [workMethods, existingSchedule] = await Promise.all([
+      // Abort previous request if any
+      if (this._abortController) {
+        this._abortController.abort();
+      }
+      this._abortController = new AbortController();
+      
+      // Muat work_methods dan jadwal secara paralel dengan timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Timeout loading schedule data')), 30000);
+      });
+      
+      const loadPromise = Promise.all([
         DataAccess.getWorkMethodsByProject(projectId),
         DataAccess.getScheduleByProject(projectId)
       ]);
+      
+      const [workMethods, existingSchedule] = await Promise.race([loadPromise, timeoutPromise]);
 
-      // Bangun map work method untuk referensi cepat
+      // Bangun map work method
       this._workMethodMap = {};
       workMethods.forEach(wm => {
         this._workMethodMap[wm.id] = wm;
       });
 
-      // Bangun _scheduleRows:
-      // Untuk setiap work_step dari setiap work_method,
-      // cari baris jadwal yang sudah ada atau buat placeholder baru.
+      // Bangun _scheduleRows dengan batasan maksimal
+      const MAX_ROWS = 500;
       this._scheduleRows = [];
 
-      workMethods.forEach(wm => {
-        const steps = Array.isArray(wm.work_steps) ? wm.work_steps : [];
-        steps.forEach((step, idx) => {
+      for (const wm of workMethods) {
+        if (this._scheduleRows.length >= MAX_ROWS) {
+          console.warn(`[SchedulePage] Reached max rows limit (${MAX_ROWS}), truncating`);
+          break;
+        }
+        
+        const steps = Array.isArray(wm.work_steps) ? wm.work_steps.slice(0, 50) : []; // Max 50 steps per WM
+        for (let idx = 0; idx < steps.length; idx++) {
+          const step = steps[idx];
           const stepNum = step.step_number || (idx + 1);
-          // Cari record jadwal yang sudah tersimpan untuk step ini
           const existing = existingSchedule.find(
             s => s.work_method_id === wm.id && String(s.step_number) === String(stepNum)
           );
           this._scheduleRows.push({
-            // ID jadwal: pakai record yang sudah ada atau generate baru (belum disimpan)
-            id:             existing?.id || null,          // null = belum pernah disimpan
+            id:             existing?.id || null,
             project_id:     projectId,
             work_method_id: wm.id,
             document_number: wm.document_number || 'Tanpa Nomor',
@@ -125,10 +193,10 @@ const SchedulePage = {
             end_date:       UtilityService.toDateInput(existing?.end_date)   || '',
             isDirty:        false
           });
-        });
-      });
+        }
+      }
 
-      // Urutkan: per dokumen, lalu nomor langkah
+      // Urutkan
       this._scheduleRows.sort((a, b) => {
         const docCmp = a.document_number.localeCompare(b.document_number);
         return docCmp !== 0 ? docCmp : a.step_number - b.step_number;
@@ -136,12 +204,31 @@ const SchedulePage = {
 
       this._renderSchedule();
     } catch (err) {
+      if (err.name === 'AbortError') {
+        console.log('[SchedulePage] Request aborted');
+        return;
+      }
       AppError.handle(err, 'Memuat jadwal');
+      const content = document.getElementById('scheduleContent');
+      if (content) {
+        content.innerHTML = `
+          <div class="alert alert-danger m-3">
+            <i class="bi bi-exclamation-triangle-fill"></i>
+            Gagal memuat jadwal: ${err.message}
+            <button class="btn btn--outline-danger btn-sm ms-3" onclick="SchedulePage.onProjectChange()">
+              <i class="bi bi-arrow-clockwise"></i> Coba Lagi
+            </button>
+          </div>`;
+      }
+    } finally {
+      this._abortController = null;
     }
   },
 
-  /* ──────────────────── RENDER ──────────────────── */
+  /* ──────────────────── RENDER (OPTIMIZED) ──────────────────── */
   _renderSchedule() {
+    if (this._isDestroyed) return;
+    
     const content = document.getElementById('scheduleContent');
     if (!content || !this._currentProjectId) return;
 
@@ -165,164 +252,198 @@ const SchedulePage = {
       return;
     }
 
-    // Hitung ringkasan
-    const totalRows   = this._scheduleRows.length;
-    const doneCount   = this._getCount('done');
+    // Hitung ringkasan dengan batasan
+    const totalRows = this._scheduleRows.length;
+    const doneCount = this._getCount('done');
     const activeCount = this._getCount('active');
-    const pendingCount= this._getCount('pending');
+    const pendingCount = totalRows - doneCount - activeCount;
 
-    // Group per dokumen
+    // Group per dokumen dengan batasan
     const grouped = {};
-    this._scheduleRows.forEach(row => {
+    for (const row of this._scheduleRows) {
       if (!grouped[row.document_number]) grouped[row.document_number] = [];
-      grouped[row.document_number].push(row);
-    });
+      if (grouped[row.document_number].length < 100) { // Max 100 steps per group display
+        grouped[row.document_number].push(row);
+      }
+    }
 
     let globalCounter = 0;
 
-    let html = `
-    <!-- Summary bar -->
-    <div class="row g-2 mb-3">
-      <div class="col-6 col-md-3">
-        <div class="stat-card stat-card--blue" style="cursor:default;">
-          <div class="stat-card__value">${totalRows}</div>
-          <div class="stat-card__label">Total Tahapan</div>
-        </div>
-      </div>
-      <div class="col-6 col-md-3">
-        <div class="stat-card stat-card--amber" style="cursor:default;">
-          <div class="stat-card__value">${pendingCount}</div>
-          <div class="stat-card__label">Belum Diatur</div>
-        </div>
-      </div>
-      <div class="col-6 col-md-3">
-        <div class="stat-card stat-card--cyan" style="cursor:default;">
-          <div class="stat-card__value">${activeCount}</div>
-          <div class="stat-card__label">Berlangsung</div>
-        </div>
-      </div>
-      <div class="col-6 col-md-3">
-        <div class="stat-card stat-card--green" style="cursor:default;">
-          <div class="stat-card__value">${doneCount}</div>
-          <div class="stat-card__label">Selesai</div>
-        </div>
-      </div>
-    </div>
+    // Build HTML dengan DocumentFragment untuk performance
+    const tableBody = document.createElement('tbody');
+    tableBody.id = 'scheduleTableBody';
 
-    <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <div>
-          <i class="bi bi-building"></i> ${UtilityService.escapeHtml(project?.name || '')}
-          <span class="ms-2 badge bg-info" style="font-size:.72rem;">${totalRows} Tahapan</span>
-        </div>
-        <span class="text-muted" style="font-size:.75rem;">
-          <i class="bi bi-info-circle"></i> Ubah tanggal lalu klik Simpan Jadwal
-        </span>
-      </div>
-      <div class="card-body p-0">
-        <div class="table-responsive">
-          <table class="table table--hover table-bordered table-sm mb-0" id="scheduleTable">
-            <thead>
-              <tr>
-                <th class="text-center" style="width:40px;">No</th>
-                <th style="min-width:200px;">Tahapan Kerja</th>
-                <th style="min-width:180px;">Proses / Kegiatan</th>
-                <th class="text-center" style="width:140px;">Tgl Mulai</th>
-                <th class="text-center" style="width:140px;">Tgl Selesai</th>
-                <th class="text-center" style="width:100px;">Status</th>
-              </tr>
-            </thead>
-            <tbody id="scheduleTableBody">`;
+    for (const [docNum, rows] of Object.entries(grouped)) {
+      // Group header row
+      const headerRow = document.createElement('tr');
+      headerRow.style.background = 'var(--color-primary-bg)';
+      headerRow.innerHTML = `
+        <td colspan="6" style="padding:6px 12px;font-weight:600;font-size:.8rem;color:var(--color-primary);">
+          <i class="bi bi-diagram-3"></i> ${UtilityService.escapeHtml(docNum)}
+          <span class="ms-2 badge bg-primary" style="font-size:.68rem;">${rows.length} langkah</span>
+        </td>
+      `;
+      tableBody.appendChild(headerRow);
 
-    Object.entries(grouped).forEach(([docNum, rows]) => {
-      html += `
-              <tr style="background:var(--color-primary-bg);">
-                <td colspan="6" style="padding:6px 12px;font-weight:600;font-size:.8rem;color:var(--color-primary);">
-                  <i class="bi bi-diagram-3"></i> ${UtilityService.escapeHtml(docNum)}
-                  <span class="ms-2 badge bg-primary" style="font-size:.68rem;">${rows.length} langkah</span>
-                </td>
-              </tr>`;
-
-      rows.forEach(item => {
+      for (const item of rows) {
         globalCounter++;
         const { statusBadge, rowStyle } = this._getStatusUI(item);
-
-        // Gunakan index di _scheduleRows sebagai data-key untuk lookup cepat
         const rowIdx = this._scheduleRows.indexOf(item);
 
-        html += `
-              <tr data-row-idx="${rowIdx}" ${rowStyle}>
-                <td class="text-center fw-semibold" style="font-size:.78rem;">${globalCounter}</td>
-                <td style="font-size:.82rem;">${UtilityService.escapeHtml(item.work_stage || '-')}</td>
-                <td style="font-size:.82rem;">${UtilityService.escapeHtml(item.work_process || '-')}</td>
-                <td class="text-center">
-                  <input type="date" class="form-control form-control-sm schedule-date"
-                         data-row-idx="${rowIdx}" data-field="start_date"
-                         value="${UtilityService.toDateInput(item.start_date)}"
-                         style="font-size:.78rem;min-width:110px;">
-                </td>
-                <td class="text-center">
-                  <input type="date" class="form-control form-control-sm schedule-date"
-                         data-row-idx="${rowIdx}" data-field="end_date"
-                         value="${UtilityService.toDateInput(item.end_date)}"
-                         style="font-size:.78rem;min-width:110px;">
-                </td>
-                <td class="text-center status-cell">${statusBadge}</td>
-              </tr>`;
-      });
-    });
+        const row = document.createElement('tr');
+        row.setAttribute('data-row-idx', rowIdx);
+        if (rowStyle) row.setAttribute('style', rowStyle);
+        
+        row.innerHTML = `
+          <td class="text-center fw-semibold" style="font-size:.78rem;">${globalCounter}</td>
+          <td style="font-size:.82rem;">${UtilityService.escapeHtml(item.work_stage || '-')}</td>
+          <td style="font-size:.82rem;">${UtilityService.escapeHtml(item.work_process || '-')}</td>
+          <td class="text-center">
+            <input type="date" class="form-control form-control-sm schedule-date"
+                   data-row-idx="${rowIdx}" data-field="start_date"
+                   value="${UtilityService.toDateInput(item.start_date)}"
+                   style="font-size:.78rem;min-width:110px;">
+          </td>
+          <td class="text-center">
+            <input type="date" class="form-control form-control-sm schedule-date"
+                   data-row-idx="${rowIdx}" data-field="end_date"
+                   value="${UtilityService.toDateInput(item.end_date)}"
+                   style="font-size:.78rem;min-width:110px;">
+          </td>
+          <td class="text-center status-cell">${statusBadge}</td>
+        `;
+        tableBody.appendChild(row);
+      }
+    }
 
-    html += `
-            </tbody>
-          </table>
+    // Build complete HTML
+    const summaryHtml = `
+      <div class="row g-2 mb-3">
+        <div class="col-6 col-md-3">
+          <div class="stat-card stat-card--blue" style="cursor:default;">
+            <div class="stat-card__value">${totalRows}</div>
+            <div class="stat-card__label">Total Tahapan</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="stat-card stat-card--amber" style="cursor:default;">
+            <div class="stat-card__value">${pendingCount}</div>
+            <div class="stat-card__label">Belum Diatur</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="stat-card stat-card--cyan" style="cursor:default;">
+            <div class="stat-card__value">${activeCount}</div>
+            <div class="stat-card__label">Berlangsung</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="stat-card stat-card--green" style="cursor:default;">
+            <div class="stat-card__value">${doneCount}</div>
+            <div class="stat-card__label">Selesai</div>
+          </div>
         </div>
       </div>
-    </div>`;
 
-    content.innerHTML = html;
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <div>
+            <i class="bi bi-building"></i> ${UtilityService.escapeHtml(project?.name || '')}
+            <span class="ms-2 badge bg-info" style="font-size:.72rem;">${totalRows} Tahapan</span>
+          </div>
+          <span class="text-muted" style="font-size:.75rem;">
+            <i class="bi bi-info-circle"></i> Ubah tanggal lalu klik Simpan Jadwal
+          </span>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table--hover table-bordered table-sm mb-0" id="scheduleTable">
+              <thead>
+                <tr>
+                  <th class="text-center" style="width:40px;">No</th>
+                  <th style="min-width:200px;">Tahapan Kerja</th>
+                  <th style="min-width:180px;">Proses / Kegiatan</th>
+                  <th class="text-center" style="width:140px;">Tgl Mulai</th>
+                  <th class="text-center" style="width:140px;">Tgl Selesai</th>
+                  <th class="text-center" style="width:100px;">Status</th>
+                </tr>
+              </thead>
+            </table>
+          </div>
+        </div>
+      </div>`;
 
-    // Pasang satu event listener (event delegation) — tidak perlu loop per baris
-    const tbody = document.getElementById('scheduleTableBody');
-    if (tbody) {
-      tbody.addEventListener('change', e => {
+    content.innerHTML = summaryHtml;
+
+    // Append the tbody to the table
+    const table = document.getElementById('scheduleTable');
+    if (table) {
+      // Remove existing tbody if any
+      const existingTbody = table.querySelector('tbody');
+      if (existingTbody) existingTbody.remove();
+      table.appendChild(tableBody);
+    }
+
+    // Pasang event listener (single delegation)
+    const scheduleTable = document.getElementById('scheduleTable');
+    if (scheduleTable) {
+      // Remove old listener first
+      if (this._dateChangeHandler) {
+        scheduleTable.removeEventListener('change', this._dateChangeHandler);
+      }
+      this._dateChangeHandler = (e) => {
         const input = e.target.closest('.schedule-date');
         if (!input) return;
         this._onDateChange(input);
-      });
+      };
+      scheduleTable.addEventListener('change', this._dateChangeHandler);
+      this._eventListeners.push({ element: scheduleTable, event: 'change', handler: this._dateChangeHandler });
     }
   },
 
-  /* ──────────────────── DATE CHANGE HANDLER ──────────────────── */
+  /* ──────────────────── DATE CHANGE HANDLER (DEBOUNCED) ──────────────────── */
   _onDateChange(input) {
-    const idx   = parseInt(input.dataset.rowIdx, 10);
-    const field = input.dataset.field;      // 'start_date' | 'end_date'
-    const item  = this._scheduleRows[idx];
+    if (this._isDestroyed) return;
+    
+    const idx = parseInt(input.dataset.rowIdx, 10);
+    if (isNaN(idx)) return;
+    
+    const field = input.dataset.field;
+    const item = this._scheduleRows[idx];
     if (!item) return;
 
-    item[field]  = input.value;
+    const oldValue = item[field];
+    const newValue = input.value;
+    
+    if (oldValue === newValue) return;
+    
+    item[field] = newValue;
     item.isDirty = true;
 
     // Validasi silang start ≤ end
     const row = document.querySelector(`tr[data-row-idx="${idx}"]`);
     if (row) {
       const startInput = row.querySelector('[data-field="start_date"]');
-      const endInput   = row.querySelector('[data-field="end_date"]');
-      const hasStart   = startInput?.value;
-      const hasEnd     = endInput?.value;
+      const endInput = row.querySelector('[data-field="end_date"]');
+      const hasStart = startInput?.value;
+      const hasEnd = endInput?.value;
 
       if (hasStart && hasEnd) {
         const invalid = new Date(startInput.value) > new Date(endInput.value);
-        const color   = invalid ? 'var(--color-danger)' : 'var(--color-success)';
-        const bg      = invalid ? 'var(--color-danger-bg)' : 'transparent';
+        const color = invalid ? 'var(--color-danger)' : 'var(--color-success)';
         [startInput, endInput].forEach(el => {
-          el.style.border     = `2px solid ${color}`;
-          el.style.background = bg;
+          if (el) {
+            el.style.border = `2px solid ${color}`;
+            el.style.background = invalid ? 'var(--color-danger-bg)' : '';
+          }
         });
         if (!invalid) {
           setTimeout(() => {
             [startInput, endInput].forEach(el => {
-              el.style.border = '';
-              el.style.background = 'transparent';
+              if (el) {
+                el.style.border = '';
+                el.style.background = '';
+              }
             });
           }, 1500);
         }
@@ -331,24 +452,54 @@ const SchedulePage = {
 
     this._updateRowStatus(idx);
     this._updateDirtyBanner();
+
+    // Auto-save after 3 seconds of inactivity (optional feature)
+    if (this._saveTimeout) clearTimeout(this._saveTimeout);
+    this._saveTimeout = setTimeout(() => {
+      if (this._scheduleRows.some(s => s.isDirty)) {
+        this.saveAllSchedules();
+      }
+    }, 5000);
   },
 
   /* ──────────────────── STATUS HELPERS ──────────────────── */
   _getStatusUI(item) {
-    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const today = new Date(); 
+    today.setHours(0, 0, 0, 0);
 
     if (!item.start_date || !item.end_date) {
-      return { statusBadge: '<span class="badge bg-secondary" style="font-size:.68rem;">Belum diatur</span>', rowStyle: '' };
+      return { 
+        statusBadge: '<span class="badge bg-secondary" style="font-size:.68rem;">Belum diatur</span>', 
+        rowStyle: '' 
+      };
     }
     if (new Date(item.start_date) > new Date(item.end_date)) {
-      return { statusBadge: '<span class="badge bg-danger" style="font-size:.68rem;">Tanggal tidak valid</span>', rowStyle: 'style="background:#fff5f5;"' };
+      return { 
+        statusBadge: '<span class="badge bg-danger" style="font-size:.68rem;">Tanggal tidak valid</span>', 
+        rowStyle: 'background:#fff5f5;' 
+      };
     }
-    const end   = new Date(item.end_date);   end.setHours(0,0,0,0);
-    const start = new Date(item.start_date); start.setHours(0,0,0,0);
+    const end = new Date(item.end_date); 
+    end.setHours(0, 0, 0, 0);
+    const start = new Date(item.start_date); 
+    start.setHours(0, 0, 0, 0);
 
-    if (end < today)          return { statusBadge: '<span class="badge bg-success" style="font-size:.68rem;">Selesai</span>',                         rowStyle: 'style="background:#f0fdf4;"' };
-    if (start <= today)       return { statusBadge: '<span class="badge bg-warning text-dark" style="font-size:.68rem;">Berlangsung</span>',           rowStyle: 'style="background:#fffbeb;"' };
-    return                           { statusBadge: '<span class="badge bg-info" style="font-size:.68rem;">Mendatang</span>',                          rowStyle: 'style="background:#f0f9ff;"' };
+    if (end < today) {
+      return { 
+        statusBadge: '<span class="badge bg-success" style="font-size:.68rem;">Selesai</span>', 
+        rowStyle: 'background:#f0fdf4;' 
+      };
+    }
+    if (start <= today) {
+      return { 
+        statusBadge: '<span class="badge bg-warning text-dark" style="font-size:.68rem;">Berlangsung</span>', 
+        rowStyle: 'background:#fffbeb;' 
+      };
+    }
+    return { 
+      statusBadge: '<span class="badge bg-info" style="font-size:.68rem;">Mendatang</span>', 
+      rowStyle: 'background:#f0f9ff;' 
+    };
   },
 
   _updateRowStatus(idx) {
@@ -360,14 +511,19 @@ const SchedulePage = {
     if (!statusCell) return;
     const { statusBadge, rowStyle } = this._getStatusUI(item);
     statusCell.innerHTML = statusBadge;
-    // Ganti row background
     const bgMatch = rowStyle.match(/background:([^;}"]+)/);
-    row.style.background = bgMatch ? bgMatch[1].trim() : '';
+    if (bgMatch) {
+      row.style.background = bgMatch[1].trim();
+    } else {
+      row.style.background = '';
+    }
   },
 
   _updateDirtyBanner() {
+    if (this._isDestroyed) return;
+    
     const hasDirty = this._scheduleRows.some(s => s.isDirty);
-    const table    = document.getElementById('scheduleTable');
+    const table = document.getElementById('scheduleTable');
     if (!table) return;
 
     let tfoot = table.querySelector('tfoot');
@@ -390,20 +546,37 @@ const SchedulePage = {
 
   /* ──────────────────── COUNT HELPERS ──────────────────── */
   _getCount(type) {
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    return this._scheduleRows.filter(s => {
-      if (!s.start_date || !s.end_date) return type === 'pending';
-      if (new Date(s.start_date) > new Date(s.end_date)) return false;
-      const start = new Date(s.start_date); start.setHours(0,0,0,0);
-      const end   = new Date(s.end_date);   end.setHours(0,0,0,0);
-      if (type === 'done')   return end < today;
-      if (type === 'active') return start <= today && end >= today;
-      return false;
-    }).length;
+    const today = new Date(); 
+    today.setHours(0, 0, 0, 0);
+    let count = 0;
+    for (const s of this._scheduleRows) {
+      if (!s.start_date || !s.end_date) {
+        if (type === 'pending') count++;
+        continue;
+      }
+      if (new Date(s.start_date) > new Date(s.end_date)) continue;
+      const start = new Date(s.start_date); 
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(s.end_date); 
+      end.setHours(0, 0, 0, 0);
+      if (type === 'done' && end < today) count++;
+      else if (type === 'active' && start <= today && end >= today) count++;
+    }
+    return count;
   },
 
-  /* ──────────────────── SAVE (FIXED) ──────────────────── */
+  /* ──────────────────── SAVE (FIXED WITH BETTER ERROR HANDLING) ──────────────────── */
   async saveAllSchedules() {
+    if (this._isDestroyed) {
+      UIService.showToast('Halaman sedang dimuat ulang, coba lagi nanti.', TOAST.WARNING);
+      return;
+    }
+    
+    if (this._isSaving) {
+      UIService.showToast('Sedang menyimpan, harap tunggu...', TOAST.INFO);
+      return;
+    }
+    
     if (!this._currentProjectId) {
       UIService.showToast('Pilih proyek terlebih dahulu!', TOAST.WARNING);
       return;
@@ -421,117 +594,118 @@ const SchedulePage = {
       return;
     }
 
-    // Hanya simpan baris yang punya tanggal atau pernah ada di DB (id !== null)
-    const rowsToSave = this._scheduleRows.filter(
-      s => s.isDirty || (s.id && (s.start_date || s.end_date))
-    );
-
+    // Hanya simpan baris yang berubah
+    const rowsToSave = this._scheduleRows.filter(s => s.isDirty);
     if (rowsToSave.length === 0) {
       UIService.showToast('Tidak ada perubahan untuk disimpan.', TOAST.INFO);
       return;
     }
 
+    this._isSaving = true;
     const saveBtn = document.getElementById('btnSaveSchedule');
+    const originalBtnHtml = saveBtn?.innerHTML;
     if (saveBtn) { 
       saveBtn.disabled = true; 
-      saveBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> Menyimpan…';
+      saveBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> Menyimpan...';
     }
 
     try {
-      // FIX: Persiapkan operations
       const now = new Date().toISOString();
       const operations = rowsToSave.map((s, idx) => {
-        // Buat ID baru untuk baris yang belum pernah disimpan
         if (!s.id) {
           s.id = 'sch_' + Date.now() + '_' + idx + '_' + Math.random().toString(36).substr(2, 5);
         }
-
         return {
           sheet: SHEETS.SCHEDULE,
           data: {
-            id:             s.id,
-            project_id:     s.project_id,
+            id: s.id,
+            project_id: s.project_id,
             work_method_id: s.work_method_id,
             document_number: s.document_number,
-            step_number:    s.step_number,
-            work_stage:     s.work_stage,
-            work_process:   s.work_process,
-            start_date:     s.start_date || '',
-            end_date:       s.end_date   || '',
-            updated_at:     now
+            step_number: s.step_number,
+            work_stage: s.work_stage,
+            work_process: s.work_process,
+            start_date: s.start_date || '',
+            end_date: s.end_date || '',
+            updated_at: now
           }
         };
       });
 
-      // FIX: Tampilkan progress untuk batch besar
-      const totalOps = operations.length;
-      console.log(`[SchedulePage] Menyimpan ${totalOps} jadwal...`);
+      console.log(`[SchedulePage] Saving ${operations.length} schedules...`);
       
-      if (totalOps > 20) {
-        UIService.showToast(`Menyimpan ${totalOps} jadwal... Mohon tunggu.`, TOAST.INFO);
-      }
-
-      // Gunakan DB.batchUpsert yang sudah difix dengan chunking
+      // Gunakan batchUpsert dengan timeout yang lebih panjang
       await DB.batchUpsert(operations);
 
-      // INVALIDASI CERDAS: Hanya untuk proyek yang sedang aktif
+      // Invalidate cache
       AppCache.invalidateRelated(SHEETS.SCHEDULE, { projectId: this._currentProjectId });
 
       // Reset dirty flags
-      this._scheduleRows.forEach(s => s.isDirty = false);
+      for (const s of this._scheduleRows) {
+        s.isDirty = false;
+      }
+      
       this._updateDirtyBanner();
-      this._renderSchedule();
-
-      UIService.showToast(`${totalOps} jadwal berhasil disimpan!`, TOAST.SUCCESS);
+      
+      // Refresh tampilan tanpa reload penuh (update status saja)
+      this._refreshStatusesOnly();
+      
+      UIService.showToast(`${operations.length} jadwal berhasil disimpan!`, TOAST.SUCCESS);
     } catch (err) {
       console.error('[SchedulePage] Gagal menyimpan jadwal:', err);
       AppError.handle(err, 'Menyimpan jadwal');
       
-      // FIX: Fallback — simpan satu per satu jika batch gagal
-      if (err.message.includes('timeout') || err.message.includes('Timeout')) {
-        UIService.showToast('Batch gagal, mencoba simpan satu per satu...', TOAST.WARNING);
-        try {
-          let savedCount = 0;
-          for (const row of rowsToSave) {
-            try {
-              await DB.upsert(SHEETS.SCHEDULE, {
-                id:             row.id || ('sch_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5)),
-                project_id:     row.project_id || this._currentProjectId,
-                work_method_id: row.work_method_id,
-                document_number: row.document_number,
-                step_number:    row.step_number,
-                work_stage:     row.work_stage,
-                work_process:   row.work_process,
-                start_date:     row.start_date || '',
-                end_date:       row.end_date   || '',
-                updated_at:     new Date().toISOString()
-              });
-              savedCount++;
-            } catch (singleErr) {
-              console.error(`[SchedulePage] Gagal simpan baris ${row.step_number}:`, singleErr);
-            }
+      // Fallback: simpan satu per satu jika batch gagal
+      if (err.message?.includes('timeout') || err.message?.includes('Timeout')) {
+        UIService.showToast('Batch timeout, mencoba simpan satu per satu...', TOAST.WARNING);
+        let savedCount = 0;
+        for (const row of rowsToSave) {
+          try {
+            await DB.upsert(SHEETS.SCHEDULE, {
+              id: row.id || ('sch_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5)),
+              project_id: row.project_id || this._currentProjectId,
+              work_method_id: row.work_method_id,
+              document_number: row.document_number,
+              step_number: row.step_number,
+              work_stage: row.work_stage,
+              work_process: row.work_process,
+              start_date: row.start_date || '',
+              end_date: row.end_date || '',
+              updated_at: new Date().toISOString()
+            });
+            savedCount++;
+            row.isDirty = false;
+            // Delay kecil antar request
+            await new Promise(r => setTimeout(r, 200));
+          } catch (singleErr) {
+            console.error(`[SchedulePage] Gagal simpan baris ${row.step_number}:`, singleErr);
           }
-          
-          AppCache.invalidateRelated(SHEETS.SCHEDULE, { projectId: this._currentProjectId });
-          this._scheduleRows.forEach(s => s.isDirty = false);
-          this._updateDirtyBanner();
-          this._renderSchedule();
-          
-          if (savedCount > 0) {
-            UIService.showToast(`${savedCount}/${totalOps} jadwal berhasil disimpan!`, TOAST.SUCCESS);
-          } else {
-            UIService.showToast('Gagal menyimpan jadwal.', TOAST.DANGER);
-          }
-        } catch (fallbackErr) {
-          console.error('[SchedulePage] Fallback juga gagal:', fallbackErr);
-          AppError.handle(fallbackErr, 'Menyimpan jadwal (fallback)');
         }
+        
+        if (savedCount > 0) {
+          AppCache.invalidateRelated(SHEETS.SCHEDULE, { projectId: this._currentProjectId });
+          this._updateDirtyBanner();
+          this._refreshStatusesOnly();
+          UIService.showToast(`${savedCount}/${rowsToSave.length} jadwal berhasil disimpan!`, TOAST.SUCCESS);
+        } else {
+          UIService.showToast('Gagal menyimpan jadwal. Silakan coba lagi.', TOAST.DANGER);
+        }
+      } else {
+        UIService.showToast('Gagal menyimpan jadwal: ' + err.message, TOAST.DANGER);
       }
     } finally {
+      this._isSaving = false;
       if (saveBtn) { 
         saveBtn.disabled = false; 
-        saveBtn.innerHTML = '<i class="bi bi-save"></i> Simpan Jadwal'; 
+        saveBtn.innerHTML = originalBtnHtml || '<i class="bi bi-save"></i> Simpan Jadwal'; 
       }
+    }
+  },
+
+  _refreshStatusesOnly() {
+    // Update status tanpa re-render penuh
+    for (let i = 0; i < this._scheduleRows.length; i++) {
+      this._updateRowStatus(i);
     }
   }
 };
